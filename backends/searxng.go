@@ -204,6 +204,98 @@ func (s *SearxngBackend) SearchRaw(opts SearchOptions) (SearxngRawResponse, erro
 	return out, nil
 }
 
+// SearxngConfigResponse is the subset of SearXNG's /config response that the
+// engine inventory needs. Unknown fields are ignored.
+type SearxngConfigResponse struct {
+	Engines []SearxngEngineConfig `json:"engines"`
+}
+
+// SearxngEngineConfig describes one upstream engine from SearXNG /config.
+type SearxngEngineConfig struct {
+	Name             string   `json:"name"`
+	Shortcut         string   `json:"shortcut"`
+	Categories       []string `json:"categories"`
+	Enabled          bool     `json:"enabled"`
+	Timeout          float64  `json:"timeout"`
+	Paging           bool     `json:"paging"`
+	SafeSearch       bool     `json:"safesearch"`
+	TimeRangeSupport bool     `json:"time_range_support"`
+	LanguageSupport  bool     `json:"language_support"`
+}
+
+// SearxngConfigFetcher is an optional extension implemented by SearXNG backends
+// that can return the upstream engine inventory from /config. The base
+// SearchBackend interface is unchanged.
+type SearxngConfigFetcher interface {
+	FetchConfig() (SearxngConfigResponse, error)
+}
+
+// FetchConfig fetches the upstream engine inventory from SearXNG's /config
+// endpoint. It always issues a single GET (no /search, no query params) and
+// never spends paid credits.
+func (s *SearxngBackend) FetchConfig() (SearxngConfigResponse, error) {
+	var out SearxngConfigResponse
+
+	if !s.IsAvailable() {
+		return out, &BackendError{
+			Backend: s.Name(),
+			Err:     fmt.Errorf("SearXNG URL not configured"),
+			Code:    ErrCodeUnavailable,
+		}
+	}
+
+	u, err := url.Parse(s.BaseURL + "/config")
+	if err != nil {
+		return out, &BackendError{
+			Backend: s.Name(),
+			Err:     fmt.Errorf("invalid SearXNG URL: %s", RedactSecrets(err.Error())),
+			Code:    ErrCodeInvalidResponse,
+		}
+	}
+
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return out, s.wrapError(err, ErrCodeNetwork)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+
+	if !s.NoUserAgent {
+		req.Header.Set("User-Agent", "sx/2.0")
+	}
+
+	if s.Username != "" && s.Password != "" {
+		req.SetBasicAuth(s.Username, s.Password)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return out, s.wrapError(err, ErrCodeNetwork)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return out, &BackendError{
+			Backend: s.Name(),
+			Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(body))),
+			Code:    resp.StatusCode,
+		}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return out, s.wrapError(err, ErrCodeInvalidResponse)
+	}
+
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, s.wrapError(fmt.Errorf("failed to parse JSON: %v", err), ErrCodeInvalidResponse)
+	}
+
+	return out, nil
+}
+
 // buildParams constructs URL parameters for SearXNG
 func (s *SearxngBackend) buildParams(query string, opts SearchOptions) url.Values {
 	params := url.Values{}

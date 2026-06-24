@@ -170,6 +170,86 @@ func (m *MultiSearxngBackend) searchRawParallelFastest(instances []*SearxngBacke
 	}
 }
 
+// FetchConfig fetches the upstream engine inventory from one of the configured
+// SearXNG instances, selected by the configured strategy. The first instance to
+// succeed wins; it never spends paid credits.
+func (m *MultiSearxngBackend) FetchConfig() (SearxngConfigResponse, error) {
+	var out SearxngConfigResponse
+
+	available := make([]*SearxngBackend, 0, len(m.instances))
+	for _, instance := range m.instances {
+		if instance.IsAvailable() {
+			available = append(available, instance)
+		}
+	}
+
+	if len(available) == 0 {
+		return out, &BackendError{
+			Backend: m.Name(),
+			Err:     fmt.Errorf("no reachable SearXNG instances configured"),
+			Code:    ErrCodeUnavailable,
+		}
+	}
+
+	switch m.strategy {
+	case SearxngStrategyParallelFastest:
+		return m.fetchConfigParallelFastest(available)
+	case SearxngStrategyOrdered:
+		fallthrough
+	default:
+		return m.fetchConfigOrdered(available)
+	}
+}
+
+func (m *MultiSearxngBackend) fetchConfigOrdered(instances []*SearxngBackend) (SearxngConfigResponse, error) {
+	var errs []error
+	for _, instance := range instances {
+		resp, err := instance.FetchConfig()
+		if err == nil {
+			return resp, nil
+		}
+		errs = append(errs, err)
+	}
+
+	return SearxngConfigResponse{}, &BackendError{
+		Backend: m.Name(),
+		Err:     fmt.Errorf("all SearXNG instances failed (%d)", len(errs)),
+		Code:    ErrCodeNetwork,
+	}
+}
+
+func (m *MultiSearxngBackend) fetchConfigParallelFastest(instances []*SearxngBackend) (SearxngConfigResponse, error) {
+	type result struct {
+		resp SearxngConfigResponse
+		err  error
+	}
+
+	ch := make(chan result, len(instances))
+
+	for _, instance := range instances {
+		inst := instance
+		go func() {
+			resp, err := inst.FetchConfig()
+			ch <- result{resp: resp, err: err}
+		}()
+	}
+
+	var errs []error
+	for i := 0; i < len(instances); i++ {
+		res := <-ch
+		if res.err == nil {
+			return res.resp, nil
+		}
+		errs = append(errs, res.err)
+	}
+
+	return SearxngConfigResponse{}, &BackendError{
+		Backend: m.Name(),
+		Err:     fmt.Errorf("all SearXNG instances failed (%d)", len(errs)),
+		Code:    ErrCodeNetwork,
+	}
+}
+
 func (m *MultiSearxngBackend) Strategy() string {
 	return m.strategy
 }

@@ -2,6 +2,7 @@ package backends
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -356,6 +357,215 @@ func TestSearxngBackend_Search_UserAgent(t *testing.T) {
 	b.Search(SearchOptions{Query: "test"})
 	if capturedUA == "sx/2.0" {
 		t.Error("expected no user agent when NoUserAgent=true")
+	}
+}
+
+// --- FetchConfig (single instance), all via httptest -----------------------
+
+// validConfigBody is a small valid /config response with two engines used by the
+// FetchConfig tests. The first engine exercises all 9 fields with non-zero values.
+const validConfigBody = `{
+	"engines": [
+		{
+			"name": "google",
+			"shortcut": "go",
+			"categories": ["general", "web"],
+			"enabled": true,
+			"timeout": 3.0,
+			"paging": true,
+			"safesearch": true,
+			"time_range_support": true,
+			"language_support": true
+		},
+		{
+			"name": "bing",
+			"shortcut": "bi",
+			"categories": ["general"],
+			"enabled": false,
+			"timeout": 20.0,
+			"paging": false,
+			"safesearch": false,
+			"time_range_support": false,
+			"language_support": false
+		}
+	]
+}`
+
+func TestSearxngBackend_FetchConfig_GETOnlyNoSearchParams(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if r.URL.Path != "/config" {
+			t.Errorf("expected path /config, got %q", r.URL.Path)
+		}
+		if r.URL.RawQuery != "" {
+			t.Errorf("expected no query params, got %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validConfigBody))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	resp, err := b.FetchConfig()
+	if err != nil {
+		t.Fatalf("FetchConfig failed: %v", err)
+	}
+	if len(resp.Engines) != 2 {
+		t.Fatalf("expected 2 engines, got %d", len(resp.Engines))
+	}
+}
+
+// FetchConfig must always use GET even when the backend is configured for POST.
+func TestSearxngBackend_FetchConfig_AlwaysGETEvenWhenPOSTConfigured(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("expected GET for /config even with POST backend, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validConfigBody))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "POST", 10*time.Second, false, false)
+	if _, err := b.FetchConfig(); err != nil {
+		t.Fatalf("FetchConfig failed: %v", err)
+	}
+}
+
+func TestSearxngBackend_FetchConfig_FieldParsing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validConfigBody))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	resp, err := b.FetchConfig()
+	if err != nil {
+		t.Fatalf("FetchConfig failed: %v", err)
+	}
+	if len(resp.Engines) < 1 {
+		t.Fatalf("expected at least 1 engine")
+	}
+	e := resp.Engines[0]
+	if e.Name != "google" {
+		t.Errorf("name = %q, want google", e.Name)
+	}
+	if e.Shortcut != "go" {
+		t.Errorf("shortcut = %q, want go", e.Shortcut)
+	}
+	if len(e.Categories) != 2 || e.Categories[0] != "general" || e.Categories[1] != "web" {
+		t.Errorf("categories = %#v, want [general web]", e.Categories)
+	}
+	if !e.Enabled {
+		t.Errorf("enabled = %v, want true", e.Enabled)
+	}
+	if e.Timeout != 3.0 {
+		t.Errorf("timeout = %v, want 3.0", e.Timeout)
+	}
+	if !e.Paging {
+		t.Errorf("paging = %v, want true", e.Paging)
+	}
+	if !e.SafeSearch {
+		t.Errorf("safesearch = %v, want true", e.SafeSearch)
+	}
+	if !e.TimeRangeSupport {
+		t.Errorf("time_range_support = %v, want true", e.TimeRangeSupport)
+	}
+	if !e.LanguageSupport {
+		t.Errorf("language_support = %v, want true", e.LanguageSupport)
+	}
+}
+
+func TestSearxngBackend_FetchConfig_BasicAuth(t *testing.T) {
+	var capturedUser, capturedPass string
+	var hadAuth bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedUser, capturedPass, hadAuth = r.BasicAuth()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validConfigBody))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "user", "pass", "GET", 10*time.Second, false, false)
+	if _, err := b.FetchConfig(); err != nil {
+		t.Fatalf("FetchConfig failed: %v", err)
+	}
+	if !hadAuth {
+		t.Fatal("expected basic auth to be set")
+	}
+	if capturedUser != "user" || capturedPass != "pass" {
+		t.Errorf("expected user/pass, got %q/%q", capturedUser, capturedPass)
+	}
+}
+
+func TestSearxngBackend_FetchConfig_UserAgent(t *testing.T) {
+	var capturedUA string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validConfigBody))
+	}))
+	defer server.Close()
+
+	// Default sends sx/2.0.
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	if _, err := b.FetchConfig(); err != nil {
+		t.Fatalf("FetchConfig failed: %v", err)
+	}
+	if capturedUA != "sx/2.0" {
+		t.Errorf("expected 'sx/2.0', got %q", capturedUA)
+	}
+
+	// With NoUserAgent=true the UA is NOT sx/2.0.
+	b = NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, true)
+	if _, err := b.FetchConfig(); err != nil {
+		t.Fatalf("FetchConfig failed: %v", err)
+	}
+	if capturedUA == "sx/2.0" {
+		t.Errorf("expected no sx/2.0 user agent when NoUserAgent=true, got %q", capturedUA)
+	}
+}
+
+func TestSearxngBackend_FetchConfig_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	if _, err := b.FetchConfig(); err == nil {
+		t.Fatal("expected error for HTTP 500")
+	}
+}
+
+func TestSearxngBackend_FetchConfig_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	if _, err := b.FetchConfig(); err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestSearxngBackend_FetchConfig_UnconfiguredURL(t *testing.T) {
+	b := NewSearxngBackend("", "", "", "GET", 10*time.Second, false, false)
+	_, err := b.FetchConfig()
+	if err == nil {
+		t.Fatal("expected error for unconfigured URL")
+	}
+	var be *BackendError
+	if !errors.As(err, &be) {
+		t.Fatalf("expected *BackendError, got %T: %v", err, err)
+	}
+	if be.Code != ErrCodeUnavailable {
+		t.Errorf("Code = %d, want ErrCodeUnavailable (%d)", be.Code, ErrCodeUnavailable)
 	}
 }
 

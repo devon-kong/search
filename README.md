@@ -237,6 +237,14 @@ sx "query" -H              # Raw HTML with anti-bot headers
 sx searxng raw "query"
 sx searxng raw "query" --news --engines "google news" --language en-US -r day -n 5
 
+# SearXNG engine inventory from /config (no /search, no paid fallback)
+sx searxng engines
+sx searxng engines --json
+sx searxng engines --category news --enabled --json
+sx searxng engines --filter google --json
+sx searxng engines --all
+sx searxng engines --live --engines google,"google news" --json
+
 # Interactive mode
 sx "query" -i
 
@@ -255,6 +263,51 @@ sx health --live           # live reachability check (warns before paid backends
 sx completion bash
 sx completion zsh
 ```
+
+### SearXNG Engine Inventory
+
+`sx searxng engines` lists the upstream engines configured on your SearXNG
+instance, read from its `/config` endpoint. By default it shows only
+config-enabled engines and issues exactly **one GET `/config`** — it never calls
+`/search`, never uses the sx JSON envelope's search path, and never triggers
+fallback or paid backends.
+
+```shell
+sx searxng engines                                      # enabled-only table
+sx searxng engines --json                               # JSON envelope
+sx searxng engines --category news --enabled --json     # filter by one category
+sx searxng engines --filter google --json               # substring on name/shortcut
+sx searxng engines --all                                # include disabled engines
+sx searxng engines --live --engines google,"google news" --json
+```
+
+Flags:
+
+- `--json` — emit a JSON envelope (see fields below).
+- `--category <cat>` — keep engines that include this category (one only).
+- `--filter <text>` — case-insensitive substring match on engine name or shortcut.
+- `--engines <a,b>` — case-insensitive exact match on engine name.
+- `--enabled` — show only config-enabled engines (this is the default).
+- `--all` — also include config-disabled engines (mutually exclusive with `--enabled`).
+- `--live` — actively probe the named engines (see constraints below).
+
+Important notes:
+
+- `enabled=true` is a **config-layer** flag only. It means the engine is enabled
+  in SearXNG's configuration, **not** that a live search will succeed.
+- `--live` is an explicit, small probe: it **requires `--engines`** and accepts
+  **at most 5** engines. It runs one tiny `/search` per named engine, never
+  changes the reported `enabled` value, and never triggers fallback or paid
+  backends. A failed probe is not fatal and does not change the exit code.
+- `/config` can be slow (≈7–15s). This command is a config/diagnostics tool, not
+  part of the normal search path.
+
+The `--json` envelope contains: `ok`, `source` (always `"searxng_config"`),
+`backend` (always `"searxng"`), `filters`, `engine_count`, `engines` (always an
+array, never null), `warnings` (always an array), and `error` (null on success).
+Each engine object carries `name`, `shortcut`, `categories`, `enabled`,
+`timeout`, `paging`, `safesearch`, `time_range_support`, `language_support`, and
+(only with `--live`) a `live` object with `ok`, `result_count`, and `error`.
 
 ### All Flags
 
