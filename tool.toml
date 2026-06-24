@@ -7,16 +7,16 @@ title = "sx"
 tagline = "Multi-engine web search from the command line"
 
 description = """
-Search the web from your terminal with multiple backends (SearXNG, Brave Search, Tavily) and automatic fallback.
+Search the web from your terminal with multiple backends (SearXNG, Brave Search, Tavily, Exa, Jina). Defaults to self-hosted SearXNG; automatic fallback is opt-in and paid backends are never used without explicit consent.
 
-Supports colorized terminal output, interactive and non-interactive modes, search categories (news, videos, images, etc.), safe search, time-range filtering, JSON output, built-in content extraction to markdown, anti-bot detection, query history, and shell completions.
+Supports colorized terminal output, interactive and non-interactive modes, search categories (news, videos, images, etc.), safe search, time-range filtering, a stable JSON output envelope with documented exit codes, built-in content extraction to markdown, anti-bot detection, query history, and shell completions.
 
 Built for both humans and AI agents. Pipe URLs to other tools, extract page content as markdown, or integrate into automation workflows.
 """
 
 language = "go"
 category = "toolz"
-version = "2.3.0"
+version = "2.4.0"
 license = "MIT"
 
 # ============================================================================
@@ -42,7 +42,7 @@ github = "https://github.com/byteowlz/sx"
 
 [[features]]
 title = "Multiple Search Backends"
-description = "SearXNG, Brave Search, and Tavily with automatic fallback when the primary engine is unreachable"
+description = "SearXNG (default), Brave, Tavily, Exa, and Jina. Fallback is opt-in and paid backends require explicit consent (allow_paid_fallback)"
 
 [[features]]
 title = "Built-in Content Extraction"

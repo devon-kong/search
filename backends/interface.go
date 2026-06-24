@@ -56,6 +56,17 @@ type BackendConfig struct {
 	IncludeRawContent bool   // for Tavily
 }
 
+// Cost tiers classify backends by whether using them spends money.
+const (
+	// CostTierSelfHosted: user-operated infra (SearXNG); no per-request cost.
+	CostTierSelfHosted = "self_hosted"
+	// CostTierFreeExternal: external service with a free/keyless tier (Jina,
+	// Brave free tier, Exa MCP); not metered as paid for fallback gating.
+	CostTierFreeExternal = "free_external"
+	// CostTierPaid: every request consumes paid credits (Tavily, Exa API).
+	CostTierPaid = "paid"
+)
+
 // SearchBackend is the interface that all search backends must implement
 type SearchBackend interface {
 	// Name returns the unique identifier for this backend
@@ -66,6 +77,11 @@ type SearchBackend interface {
 
 	// IsAvailable checks if the backend is properly configured and reachable
 	IsAvailable() bool
+
+	// CostTier reports whether using this backend spends money. Used to gate
+	// automatic paid fallback. One of CostTierSelfHosted / CostTierFreeExternal
+	// / CostTierPaid.
+	CostTier() string
 }
 
 // BackendError represents an error from a specific backend
@@ -86,9 +102,9 @@ func (e *BackendError) Unwrap() error {
 
 // Error codes for backend failures
 const (
-	ErrCodeUnavailable = iota // Backend not configured
-	ErrCodeNetwork            // Network/connectivity issue
-	ErrCodeAuth               // Authentication failure
-	ErrCodeRateLimit          // Rate limited
-	ErrCodeInvalidResponse    // Invalid/malformed response
+	ErrCodeUnavailable     = iota // Backend not configured
+	ErrCodeNetwork                // Network/connectivity issue
+	ErrCodeAuth                   // Authentication failure
+	ErrCodeRateLimit              // Rate limited
+	ErrCodeInvalidResponse        // Invalid/malformed response
 )

@@ -7,9 +7,20 @@ import (
 
 // Manager coordinates search across multiple backends with fallback support
 type Manager struct {
-	primary   SearchBackend
-	fallbacks []SearchBackend
-	registry  map[string]SearchBackend
+	primary           SearchBackend
+	fallbacks         []SearchBackend
+	registry          map[string]SearchBackend
+	allowPaidFallback bool
+}
+
+// SearchOutcome carries the results of a Search along with metadata about which
+// backend served the request and whether a fallback was used.
+type SearchOutcome struct {
+	Results        []SearchResult
+	Backend        string   // name of the backend that produced Results
+	FallbackUsed   bool     // true if a fallback (not the primary) served the request
+	FallbackReason string   // human-readable reason describing fallback/skip decisions
+	Warnings       []string // non-fatal notes (e.g. paid backends skipped)
 }
 
 // NewManager creates a new backend manager
@@ -17,6 +28,13 @@ func NewManager() *Manager {
 	return &Manager{
 		registry: make(map[string]SearchBackend),
 	}
+}
+
+// SetAllowPaidFallback controls whether automatic fallback may use paid
+// backends (CostTierPaid). When false (default), paid backends are skipped in
+// the fallback chain and a warning is recorded.
+func (m *Manager) SetAllowPaidFallback(allow bool) {
+	m.allowPaidFallback = allow
 }
 
 // Register adds a backend to the registry
@@ -47,24 +65,40 @@ func (m *Manager) SetFallbacks(names []string) error {
 	return nil
 }
 
-// Search performs a search using the primary backend, falling back to alternatives
-// Returns the results, the backend name that succeeded, and any error
-func (m *Manager) Search(opts SearchOptions) ([]SearchResult, string, error) {
+// Search performs a search using the primary backend, falling back to
+// alternatives. It returns a SearchOutcome with the results plus metadata about
+// which backend served the request and whether a fallback was used.
+//
+// Automatic fallback never uses a paid backend (CostTierPaid) unless
+// SetAllowPaidFallback(true) was called; skipped paid backends are recorded in
+// the outcome's Warnings and FallbackReason so callers can surface them.
+func (m *Manager) Search(opts SearchOptions) (SearchOutcome, error) {
 	if m.primary == nil {
-		return nil, "", fmt.Errorf("no primary backend configured")
+		return SearchOutcome{}, fmt.Errorf("no primary backend configured")
 	}
 
 	// Try primary backend first
 	results, err := m.primary.Search(opts)
 	if err == nil {
-		return results, m.primary.Name(), nil
+		return SearchOutcome{
+			Results: results,
+			Backend: m.primary.Name(),
+		}, nil
 	}
 
-	// Primary failed - collect errors
+	// Primary failed - collect errors and warnings
 	errors := []string{err.Error()}
+	var warnings []string
 
 	// Try fallbacks in order
 	for _, fb := range m.fallbacks {
+		// Gate: never auto-fallback to a paid backend unless explicitly allowed.
+		if fb.CostTier() == CostTierPaid && !m.allowPaidFallback {
+			warnings = append(warnings, fmt.Sprintf("skipped paid fallback %q (set allow_paid_fallback=true to enable)", fb.Name()))
+			errors = append(errors, fmt.Sprintf("%s: skipped (paid backend, allow_paid_fallback=false)", fb.Name()))
+			continue
+		}
+
 		if !fb.IsAvailable() {
 			errors = append(errors, fmt.Sprintf("%s: not configured", fb.Name()))
 			continue
@@ -72,13 +106,35 @@ func (m *Manager) Search(opts SearchOptions) ([]SearchResult, string, error) {
 
 		results, fbErr := fb.Search(opts)
 		if fbErr == nil {
-			return results, fb.Name(), nil
+			return SearchOutcome{
+				Results:        results,
+				Backend:        fb.Name(),
+				FallbackUsed:   true,
+				FallbackReason: fmt.Sprintf("primary %q failed: %v", m.primary.Name(), err),
+				Warnings:       warnings,
+			}, nil
 		}
 		errors = append(errors, fbErr.Error())
 	}
 
-	return nil, "", fmt.Errorf("all backends failed:\n  %s", strings.Join(errors, "\n  "))
+	// Wrap the primary error so callers (e.g. the JSON envelope) can still
+	// recover the typed *BackendError code/retryable classification via
+	// errors.As, while the message lists every backend that was tried.
+	return SearchOutcome{Warnings: warnings}, &aggregateError{
+		primary: err,
+		summary: fmt.Sprintf("all backends failed:\n  %s", strings.Join(errors, "\n  ")),
+	}
 }
+
+// aggregateError reports that all backends failed while preserving the primary
+// backend's underlying error for type inspection (errors.As / errors.Unwrap).
+type aggregateError struct {
+	primary error
+	summary string
+}
+
+func (a *aggregateError) Error() string { return a.summary }
+func (a *aggregateError) Unwrap() error { return a.primary }
 
 // SearchExplicit searches using a specific backend by name (no fallback)
 func (m *Manager) SearchExplicit(name string, opts SearchOptions) ([]SearchResult, error) {

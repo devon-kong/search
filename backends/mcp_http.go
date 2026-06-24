@@ -67,7 +67,7 @@ func (c *MCPHTTPClient) call(method string, id int, params interface{}) (json.Ra
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(respBody)))
 	}
 
 	var rpcResp mcpRPCResponse
@@ -86,7 +86,7 @@ func (c *MCPHTTPClient) Initialize() error {
 		"capabilities":    map[string]interface{}{},
 		"clientInfo": map[string]interface{}{
 			"name":    "sx",
-			"version": "2.2.0",
+			"version": "2.4.0",
 		},
 	})
 	return err

@@ -34,22 +34,25 @@ type Config struct {
 	MaxHistory      int      `toml:"max_history"`
 
 	// Multi-engine support
-	Engine          string       `toml:"engine"`
-	FallbackEngines []string     `toml:"fallback_engines,omitempty"`
-	EnginesBrave    BraveConfig  `toml:"engines_brave"`
-	EnginesTavily   TavilyConfig `toml:"engines_tavily"`
-	EnginesExa      ExaConfig    `toml:"engines_exa"`
-	EnginesJina     JinaConfig   `toml:"engines_jina"`
+	Engine            string       `toml:"engine"`
+	FallbackEngines   []string     `toml:"fallback_engines,omitempty"`
+	AllowPaidFallback bool         `toml:"allow_paid_fallback"`
+	EnginesBrave      BraveConfig  `toml:"engines_brave"`
+	EnginesTavily     TavilyConfig `toml:"engines_tavily"`
+	EnginesExa        ExaConfig    `toml:"engines_exa"`
+	EnginesJina       JinaConfig   `toml:"engines_jina"`
 }
 
 // BraveConfig holds Brave Search API configuration
 type BraveConfig struct {
-	APIKey string `toml:"api_key,omitempty"`
+	APIKey  string `toml:"api_key,omitempty"`
+	BaseURL string `toml:"base_url,omitempty"`
 }
 
 // TavilyConfig holds Tavily Search API configuration
 type TavilyConfig struct {
 	APIKey            string `toml:"api_key,omitempty"`
+	BaseURL           string `toml:"base_url,omitempty"`
 	SearchDepth       string `toml:"search_depth,omitempty"`
 	IncludeRawContent bool   `toml:"include_raw_content,omitempty"`
 	IncludeAnswer     bool   `toml:"include_answer,omitempty"`
@@ -59,6 +62,7 @@ type TavilyConfig struct {
 type ExaConfig struct {
 	Mode       string `toml:"mode,omitempty"` // auto | api | mcp
 	APIKey     string `toml:"api_key,omitempty"`
+	BaseURL    string `toml:"base_url,omitempty"`
 	MCPURL     string `toml:"mcp_url,omitempty"`
 	MCPTool    string `toml:"mcp_tool,omitempty"`
 	NumResults int    `toml:"num_results,omitempty"`
@@ -70,8 +74,6 @@ type JinaConfig struct {
 	AllowKeyless bool   `toml:"allow_keyless"`
 	BaseURL      string `toml:"base_url,omitempty"`
 }
-
-
 
 const (
 	defaultSearxngURL      = "https://searxng.example.com"
@@ -96,7 +98,8 @@ var defaultURLHandlers = map[string]string{
 	"windows": "explorer",
 }
 
-func getConfigDir() string {
+// configHomeDir returns the base XDG config directory (honors XDG_CONFIG_HOME).
+func configHomeDir() string {
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		homeDir, err := os.UserHomeDir()
@@ -105,7 +108,27 @@ func getConfigDir() string {
 		}
 		configHome = filepath.Join(homeDir, ".config")
 	}
-	return filepath.Join(configHome, "sx")
+	return configHome
+}
+
+// getConfigDir returns the canonical config directory: ~/.config/search-engine
+// (or $XDG_CONFIG_HOME/search-engine).
+func getConfigDir() string {
+	base := configHomeDir()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "search-engine")
+}
+
+// getLegacyConfigDir returns the previous config directory (~/.config/sx). Used
+// only as a read-only migration source; sx never writes here.
+func getLegacyConfigDir() string {
+	base := configHomeDir()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "sx")
 }
 
 func getDefaultConfig() *Config {
@@ -146,9 +169,26 @@ func loadConfig() (*Config, error) {
 
 	config := getDefaultConfig()
 
-	// If config file exists, load it
+	// Resolve which file to read. Prefer the canonical directory. If it has no
+	// config but the legacy ~/.config/sx/config.toml exists, read that as a
+	// read-only migration bridge (we never write to the legacy location).
+	//
+	// To hard-cut and drop legacy support, delete this migration block.
+	readFile := ""
 	if _, err := os.Stat(configFile); err == nil {
-		if _, err := toml.DecodeFile(configFile, config); err != nil {
+		readFile = configFile
+	} else {
+		legacyFile := filepath.Join(getLegacyConfigDir(), "config.toml")
+		if _, lerr := os.Stat(legacyFile); lerr == nil {
+			readFile = legacyFile
+			fmt.Fprintf(os.Stderr,
+				"Notice: using legacy config %s. The new location is %s; copy your config there to silence this notice (the old file is left untouched).\n",
+				legacyFile, configFile)
+		}
+	}
+
+	if readFile != "" {
+		if _, err := toml.DecodeFile(readFile, config); err != nil {
 			return nil, fmt.Errorf("failed to load config: %v", err)
 		}
 	}
@@ -177,12 +217,21 @@ func ensureConfig() error {
 	configDir := getConfigDir()
 	configFile := filepath.Join(configDir, "config.toml")
 
-	// If config file doesn't exist, create it
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		return createConfigFile(configDir, configFile)
+	// Canonical config already exists: nothing to do.
+	if _, err := os.Stat(configFile); err == nil {
+		return nil
 	}
 
-	return nil
+	// Read-only migration bridge: if a legacy ~/.config/sx/config.toml exists,
+	// keep using it and do NOT create a new (empty) file in the canonical dir,
+	// which would otherwise shadow the legacy config on the next run.
+	legacyFile := filepath.Join(getLegacyConfigDir(), "config.toml")
+	if _, err := os.Stat(legacyFile); err == nil {
+		return nil
+	}
+
+	// No config anywhere: create one in the canonical directory.
+	return createConfigFile(configDir, configFile)
 }
 
 func deduplicateStrings(values []string) []string {
@@ -214,18 +263,36 @@ func hasSearxngConfigured(config *Config) bool {
 	return false
 }
 
+// interactiveConfigPrompt reports whether it is safe to prompt the user for
+// config on stdin: stdout must be a TTY, input must not be piped, and machine
+// output (--json) must not be requested.
+func interactiveConfigPrompt() bool {
+	if searchOpts.JSON {
+		return false
+	}
+	if !isTerminal(os.Stdout) || isPipeInput() {
+		return false
+	}
+	return true
+}
+
 func createConfigFile(configDir, configFile string) error {
 	// Create config directory if it doesn't exist
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return err
 	}
 
-	// Prompt for SearXNG URL
-	fmt.Printf("Enter your SearXNG instance URL [%s]: ", defaultSearxngURL)
-	var searxngURL string
-	fmt.Scanln(&searxngURL)
-	if strings.TrimSpace(searxngURL) == "" {
-		searxngURL = defaultSearxngURL
+	// Determine SearXNG URL. Only prompt when running interactively; in
+	// non-TTY / piped / --json contexts we must never block on stdin. In those
+	// cases we seed an empty URL so the downstream "no SearXNG configured"
+	// check produces a structured config error (exit code 2) instead of hanging.
+	searxngURL := ""
+	if interactiveConfigPrompt() {
+		fmt.Printf("Enter your SearXNG instance URL [%s]: ", defaultSearxngURL)
+		fmt.Scanln(&searxngURL)
+		if strings.TrimSpace(searxngURL) == "" {
+			searxngURL = defaultSearxngURL
+		}
 	}
 
 	// Create default config
@@ -264,6 +331,7 @@ func createConfigFile(configDir, configFile string) error {
 		return err
 	}
 
-	fmt.Printf("Created config file: %s\n", configFile)
+	// Status to stderr so stdout stays clean for machine-readable output.
+	fmt.Fprintf(os.Stderr, "Created config file: %s\n", configFile)
 	return nil
 }

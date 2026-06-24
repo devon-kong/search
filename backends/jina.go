@@ -39,6 +39,11 @@ func (j *JinaBackend) Name() string {
 	return "jina"
 }
 
+// CostTier reports Jina as free_external (keyless/free tier; not gated as paid).
+func (j *JinaBackend) CostTier() string {
+	return CostTierFreeExternal
+}
+
 func (j *JinaBackend) IsAvailable() bool {
 	return strings.TrimSpace(j.APIKey) != "" || j.AllowKeyless
 }
@@ -102,7 +107,7 @@ func (j *JinaBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 
 	resp, err := j.client.Do(req)
 	if err != nil {
-		return nil, &BackendError{Backend: j.Name(), Err: err, Code: ErrCodeNetwork}
+		return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("%s", RedactSecrets(err.Error())), Code: ErrCodeNetwork}
 	}
 	defer resp.Body.Close()
 
@@ -112,12 +117,12 @@ func (j *JinaBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("authentication failed: %s", string(body)), Code: ErrCodeAuth}
+			return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("authentication failed: %s", TruncateBody(string(body))), Code: ErrCodeAuth}
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("rate limited: %s", string(body)), Code: ErrCodeRateLimit}
+			return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("rate limited: %s", TruncateBody(string(body))), Code: ErrCodeRateLimit}
 		}
-		return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)), Code: resp.StatusCode}
+		return nil, &BackendError{Backend: j.Name(), Err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(body))), Code: resp.StatusCode}
 	}
 
 	var jinaResp jinaResponse

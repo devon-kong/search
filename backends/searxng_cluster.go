@@ -53,6 +53,11 @@ func (m *MultiSearxngBackend) Name() string {
 	return "searxng"
 }
 
+// CostTier reports SearXNG as self-hosted (no per-request paid cost).
+func (m *MultiSearxngBackend) CostTier() string {
+	return CostTierSelfHosted
+}
+
 func (m *MultiSearxngBackend) IsAvailable() bool {
 	for _, instance := range m.instances {
 		if instance.IsAvailable() {

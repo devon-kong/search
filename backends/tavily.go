@@ -46,6 +46,11 @@ func (t *TavilyBackend) Name() string {
 	return "tavily"
 }
 
+// CostTier reports Tavily as paid: every request consumes credits.
+func (t *TavilyBackend) CostTier() string {
+	return CostTierPaid
+}
+
 // IsAvailable checks if Tavily API key is configured
 func (t *TavilyBackend) IsAvailable() bool {
 	return t.APIKey != ""
@@ -62,10 +67,10 @@ type tavilyRequest struct {
 
 // tavilyResponse is the Tavily search API response
 type tavilyResponse struct {
-	Query        string          `json:"query"`
-	Answer       string          `json:"answer"`
-	Results      []tavilyResult  `json:"results"`
-	ResponseTime float64         `json:"response_time"`
+	Query        string         `json:"query"`
+	Answer       string         `json:"answer"`
+	Results      []tavilyResult `json:"results"`
+	ResponseTime float64        `json:"response_time"`
 }
 
 type tavilyResult struct {
@@ -130,7 +135,7 @@ func (t *TavilyBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	if err != nil {
 		return nil, &BackendError{
 			Backend: t.Name(),
-			Err:     fmt.Errorf("request failed: %v", err),
+			Err:     fmt.Errorf("request failed: %s", RedactSecrets(err.Error())),
 			Code:    ErrCodeNetwork,
 		}
 	}
@@ -150,19 +155,19 @@ func (t *TavilyBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 		case 401, 403:
 			return nil, &BackendError{
 				Backend: t.Name(),
-				Err:     fmt.Errorf("authentication failed: %s", string(respBody)),
+				Err:     fmt.Errorf("authentication failed: %s", TruncateBody(string(respBody))),
 				Code:    ErrCodeAuth,
 			}
 		case 429:
 			return nil, &BackendError{
 				Backend: t.Name(),
-				Err:     fmt.Errorf("rate limited: %s", string(respBody)),
+				Err:     fmt.Errorf("rate limited: %s", TruncateBody(string(respBody))),
 				Code:    ErrCodeRateLimit,
 			}
 		default:
 			return nil, &BackendError{
 				Backend: t.Name(),
-				Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody)),
+				Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(respBody))),
 				Code:    resp.StatusCode,
 			}
 		}

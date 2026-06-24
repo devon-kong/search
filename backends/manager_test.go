@@ -12,10 +12,17 @@ type mockBackend struct {
 	available bool
 	results   []SearchResult
 	err       error
+	costTier  string
 }
 
-func (m *mockBackend) Name() string          { return m.name }
-func (m *mockBackend) IsAvailable() bool     { return m.available }
+func (m *mockBackend) Name() string      { return m.name }
+func (m *mockBackend) IsAvailable() bool { return m.available }
+func (m *mockBackend) CostTier() string {
+	if m.costTier == "" {
+		return CostTierFreeExternal
+	}
+	return m.costTier
+}
 func (m *mockBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	if m.err != nil {
 		return nil, m.err
@@ -81,17 +88,17 @@ func TestManager_Search_PrimarySuccess(t *testing.T) {
 	mgr.SetPrimary("primary")
 	mgr.SetFallbacks([]string{"fallback"})
 
-	results, engine, err := mgr.Search(SearchOptions{Query: "test"})
+	outcome, err := mgr.Search(SearchOptions{Query: "test"})
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
 
-	if engine != "primary" {
-		t.Errorf("expected engine 'primary', got %q", engine)
+	if outcome.Backend != "primary" {
+		t.Errorf("expected engine 'primary', got %q", outcome.Backend)
 	}
 
-	if len(results) != 1 || results[0].Title != "Result 1" {
-		t.Errorf("unexpected results: %v", results)
+	if len(outcome.Results) != 1 || outcome.Results[0].Title != "Result 1" {
+		t.Errorf("unexpected results: %v", outcome.Results)
 	}
 }
 
@@ -114,17 +121,20 @@ func TestManager_Search_FallbackOnPrimaryFailure(t *testing.T) {
 	mgr.SetPrimary("primary")
 	mgr.SetFallbacks([]string{"fallback"})
 
-	results, engine, err := mgr.Search(SearchOptions{Query: "test"})
+	outcome, err := mgr.Search(SearchOptions{Query: "test"})
 	if err != nil {
 		t.Fatalf("Search should have fallen back: %v", err)
 	}
 
-	if engine != "fallback" {
-		t.Errorf("expected engine 'fallback', got %q", engine)
+	if outcome.Backend != "fallback" {
+		t.Errorf("expected engine 'fallback', got %q", outcome.Backend)
+	}
+	if !outcome.FallbackUsed {
+		t.Errorf("expected FallbackUsed to be true")
 	}
 
-	if len(results) != 1 || results[0].Title != "Fallback Result" {
-		t.Errorf("unexpected results: %v", results)
+	if len(outcome.Results) != 1 || outcome.Results[0].Title != "Fallback Result" {
+		t.Errorf("unexpected results: %v", outcome.Results)
 	}
 }
 
@@ -141,7 +151,7 @@ func TestManager_Search_AllBackendsFail(t *testing.T) {
 	mgr.SetPrimary("primary")
 	mgr.SetFallbacks([]string{"fb1", "fb2"})
 
-	_, _, err := mgr.Search(SearchOptions{Query: "test"})
+	_, err := mgr.Search(SearchOptions{Query: "test"})
 	if err == nil {
 		t.Fatal("expected error when all backends fail")
 	}
@@ -162,7 +172,7 @@ func TestManager_Search_AllBackendsFail(t *testing.T) {
 
 func TestManager_Search_NoPrimary(t *testing.T) {
 	mgr := NewManager()
-	_, _, err := mgr.Search(SearchOptions{Query: "test"})
+	_, err := mgr.Search(SearchOptions{Query: "test"})
 	if err == nil {
 		t.Fatal("expected error with no primary backend")
 	}
@@ -255,16 +265,16 @@ func TestManager_FallbackOrder(t *testing.T) {
 	mgr.SetPrimary("primary")
 	mgr.SetFallbacks([]string{"fb1", "fb2"})
 
-	results, engine, err := mgr.Search(SearchOptions{Query: "test"})
+	outcome, err := mgr.Search(SearchOptions{Query: "test"})
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
 
 	_ = callOrder // call order tracked implicitly by which engine succeeds
-	if engine != "fb2" {
-		t.Errorf("expected fb2 to be used, got %q", engine)
+	if outcome.Backend != "fb2" {
+		t.Errorf("expected fb2 to be used, got %q", outcome.Backend)
 	}
-	if len(results) != 1 || results[0].Title != "fb2 result" {
-		t.Errorf("unexpected results: %v", results)
+	if len(outcome.Results) != 1 || outcome.Results[0].Title != "fb2 result" {
+		t.Errorf("unexpected results: %v", outcome.Results)
 	}
 }

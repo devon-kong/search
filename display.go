@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -589,6 +590,152 @@ func cleanSearchResult(result SearchResult) map[string]interface{} {
 	return cleaned
 }
 
+// --- JSON envelope (machine-readable contract) ---------------------------
+
+// jsonBackendMeta describes which backend served (or was requested for) a query.
+type jsonBackendMeta struct {
+	Requested    string  `json:"requested"`
+	Used         *string `json:"used"` // null when no backend succeeded (failure)
+	FallbackUsed bool    `json:"fallback_used"`
+	// FallbackReason is empty when no fallback occurred.
+	FallbackReason string `json:"fallback_reason"`
+	CostTier       string `json:"cost_tier"`
+}
+
+// jsonError is the structured error block emitted on failure.
+type jsonError struct {
+	Code              string `json:"code"`
+	Message           string `json:"message"`
+	Backend           string `json:"backend"`
+	Retryable         bool   `json:"retryable"`
+	RetryAfterSeconds *int   `json:"retry_after_seconds"` // always null in Phase 1 (no reliable source)
+	Hint              string `json:"hint,omitempty"`
+}
+
+// jsonTiming carries request timing.
+type jsonTiming struct {
+	TotalMs int64 `json:"total_ms"`
+}
+
+// JSONEnvelope is the full machine-readable response contract.
+type JSONEnvelope struct {
+	OK       bool            `json:"ok"`
+	Query    string          `json:"query"`
+	Backend  jsonBackendMeta `json:"backend"`
+	Timing   jsonTiming      `json:"timing"`
+	Results  interface{}     `json:"results"`  // []SearchResult or []map (clean)
+	Warnings []string        `json:"warnings"` // never null; empty slice on success
+	Error    *jsonError      `json:"error"`    // null on success
+}
+
+// mapErrCodeToJSON maps a backends.ErrCode* integer to the stable JSON error
+// code string and whether the failure is retryable.
+func mapErrCodeToJSON(code int) (string, bool) {
+	switch code {
+	case backends.ErrCodeUnavailable:
+		return "BACKEND_UNAVAILABLE", false
+	case backends.ErrCodeNetwork:
+		return "NETWORK", true
+	case backends.ErrCodeAuth:
+		return "AUTH", false
+	case backends.ErrCodeRateLimit:
+		return "RATE_LIMIT", true
+	case backends.ErrCodeInvalidResponse:
+		return "INVALID_RESPONSE", false
+	default:
+		// HTTP status codes or unknown: treat 5xx/0 as retryable.
+		if code >= 500 || code == 0 {
+			return "BACKEND_UNAVAILABLE", true
+		}
+		return "BACKEND_UNAVAILABLE", false
+	}
+}
+
+// buildJSONError constructs a structured jsonError from a search error,
+// inspecting a wrapped *backends.BackendError for code/backend when available.
+func buildJSONError(err error, requestedBackend string) *jsonError {
+	code := "BACKEND_UNAVAILABLE"
+	retryable := false
+	backend := requestedBackend
+
+	var be *backends.BackendError
+	if errors.As(err, &be) {
+		code, retryable = mapErrCodeToJSON(be.Code)
+		if be.Backend != "" {
+			backend = be.Backend
+		}
+	}
+
+	hint := ""
+	switch code {
+	case "AUTH":
+		hint = "check the API key for this backend"
+	case "BACKEND_UNAVAILABLE":
+		hint = "verify the backend is configured and reachable (searxng_url or API key)"
+	case "RATE_LIMIT":
+		hint = "wait and retry, or use a different backend"
+	case "NETWORK":
+		hint = "check network connectivity and the backend URL"
+	}
+
+	return &jsonError{
+		Code:              code,
+		Message:           backends.RedactSecrets(err.Error()),
+		Backend:           backend,
+		Retryable:         retryable,
+		RetryAfterSeconds: nil,
+		Hint:              hint,
+	}
+}
+
+// writeJSONEnvelope marshals and prints the envelope to stdout. Used for both
+// success and failure paths so stdout always carries valid JSON in --json mode.
+func writeJSONEnvelope(env *JSONEnvelope) error {
+	if env.Warnings == nil {
+		env.Warnings = []string{}
+	}
+	jsonData, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(jsonData))
+	return nil
+}
+
+// writeJSONEnvelopeToFile writes the envelope to a file instead of stdout.
+func writeJSONEnvelopeToFile(env *JSONEnvelope, outputFile string) error {
+	if env.Warnings == nil {
+		env.Warnings = []string{}
+	}
+	jsonData, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.Create(outputFile)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %v", err)
+	}
+	defer file.Close()
+	_, err = file.Write(jsonData)
+	return err
+}
+
+// buildResultsForJSON returns the results value for the envelope, applying the
+// clean (omit-empty) transform when requested.
+func buildResultsForJSON(results []SearchResult, clean bool) interface{} {
+	if clean {
+		cleaned := make([]map[string]interface{}, len(results))
+		for i, r := range results {
+			cleaned[i] = cleanSearchResult(r)
+		}
+		return cleaned
+	}
+	return results
+}
+
+// printJSONResults / printJSONResultsClean emit a compact {query, results}
+// object. These remain for the interactive-mode "j N" command (show one
+// result's JSON); the primary --json output uses the full JSONEnvelope above.
 func printJSONResults(results []SearchResult, query string) error {
 	output := map[string]interface{}{
 		"query":   query,
@@ -639,40 +786,6 @@ func printLinksOnly(results []SearchResult, outputFile string) error {
 	}
 
 	return nil
-}
-
-func printJSONToFile(results []SearchResult, outputFile string, query string, clean bool) error {
-	file, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %v", err)
-	}
-	defer file.Close()
-
-	var output map[string]interface{}
-
-	if clean {
-		cleanedResults := make([]map[string]interface{}, len(results))
-		for i, result := range results {
-			cleanedResults[i] = cleanSearchResult(result)
-		}
-		output = map[string]interface{}{
-			"query":   query,
-			"results": cleanedResults,
-		}
-	} else {
-		output = map[string]interface{}{
-			"query":   query,
-			"results": results,
-		}
-	}
-
-	jsonData, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	_, err = file.Write(jsonData)
-	return err
 }
 
 func printResultsToFile(results []SearchResult, count int, startAt int, expand bool, noColor bool, query string, outputFile string) error {

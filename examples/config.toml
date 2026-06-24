@@ -1,13 +1,25 @@
 "$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/sx/sx.config.schema.json"
 
 # sx configuration file
-# Copy to $XDG_CONFIG_HOME/sx/config.toml (typically ~/.config/sx/config.toml)
+# Copy to $XDG_CONFIG_HOME/search-engine/config.toml
+# (typically ~/.config/search-engine/config.toml).
+# A legacy ~/.config/sx/config.toml is still read (read-only) if present.
 
 # Primary search engine (searxng, exa, jina, brave, tavily)
 engine = "searxng"
 
-# Fallback engines tried in order if primary fails
-fallback_engines = ["exa", "jina", "brave", "tavily"]
+# Automatic fallback is OFF by default. Leave this empty to never fall back.
+# Only the engines you list here are tried (in order) when the primary fails.
+fallback_engines = []
+# Example opt-in (free/self-hosted engines only):
+# fallback_engines = ["jina", "brave"]
+
+# Paid backends (tavily, exa API) are NEVER used in automatic fallback unless
+# you explicitly opt in below. This protects you from silently spending credits.
+allow_paid_fallback = false
+# To allow paid fallback you must BOTH set this true AND list the paid engine:
+# allow_paid_fallback = true
+# fallback_engines = ["jina", "brave", "tavily"]
 
 # Primary SearXNG instance URL (required when engine = "searxng")
 searxng_url = "https://searxng.example.com"
@@ -77,6 +89,7 @@ max_history = 100
 [engines_exa]
 mode = "auto"                 # auto, api, mcp
 api_key = ""                  # optional, or set EXA_API_KEY env var
+# base_url = "https://api.exa.ai/search"  # override the Exa API endpoint
 mcp_url = ""                  # optional MCP endpoint URL (e.g. https://mcp.exa.ai/mcp)
 mcp_tool = "exa-web-search"   # MCP tool to call
 num_results = 10
@@ -91,11 +104,13 @@ base_url = "https://s.jina.ai"
 # Free tier: 2,000 requests/month
 [engines_brave]
 api_key = ""                  # optional, or set BRAVE_API_KEY env var
+# base_url = "https://api.search.brave.com/res/v1/web/search"  # override endpoint
 
-# Tavily Search API (https://tavily.com/)
-# Free tier: 1,000 credits/month
+# Tavily Search API (https://tavily.com/) — PAID backend
+# Free tier: 1,000 credits/month. Each search consumes >= 1 credit.
 [engines_tavily]
 api_key = ""                  # optional, or set TAVILY_API_KEY env var
+# base_url = "https://api.tavily.com/search"  # override endpoint
 search_depth = "basic"        # basic (1 credit) or advanced (2 credits)
-include_raw_content = false    # return full page content with results
-include_answer = false         # return a direct answer
+include_raw_content = false   # return full page content with results
+include_answer = false        # return a direct answer

@@ -67,6 +67,10 @@ func initBackendManager(config *Config) *backends.Manager {
 		braveAPIKey,
 		time.Duration(config.Timeout)*time.Second,
 	)
+	// Wire optional configured base_url (overrides the hardcoded default).
+	if u := strings.TrimSpace(config.EnginesBrave.BaseURL); u != "" {
+		brave.BaseURL = u
+	}
 	mgr.Register(brave)
 
 	// Register Tavily backend
@@ -85,6 +89,9 @@ func initBackendManager(config *Config) *backends.Manager {
 		config.EnginesTavily.IncludeRawContent,
 		config.EnginesTavily.IncludeAnswer,
 	)
+	if u := strings.TrimSpace(config.EnginesTavily.BaseURL); u != "" {
+		tavily.BaseURL = u
+	}
 	mgr.Register(tavily)
 
 	// Register Exa backend (API + MCP + auto mode)
@@ -100,6 +107,9 @@ func initBackendManager(config *Config) *backends.Manager {
 		config.EnginesExa.MCPTool,
 		config.EnginesExa.NumResults,
 	)
+	if u := strings.TrimSpace(config.EnginesExa.BaseURL); u != "" {
+		exa.BaseURL = u
+	}
 	mgr.Register(exa)
 
 	// Register Jina backend (keyed or keyless)
@@ -132,11 +142,16 @@ func initBackendManager(config *Config) *backends.Manager {
 		}
 	}
 
+	// Paid fallback is opt-in: by default the fallback chain skips paid
+	// backends (Tavily, Exa API) to avoid silently spending credits.
+	mgr.SetAllowPaidFallback(config.AllowPaidFallback)
+
 	return mgr
 }
 
-// performSearch executes a search using the backend manager
-func performSearch(query string, config *Config, searchOpts *SearchOptions, mgr *backends.Manager, explicitEngine string) ([]backends.SearchResult, string, error) {
+// performSearch executes a search using the backend manager and returns a
+// SearchOutcome carrying results plus backend metadata.
+func performSearch(query string, config *Config, searchOpts *SearchOptions, mgr *backends.Manager, explicitEngine string) (backends.SearchOutcome, error) {
 	opts := backends.SearchOptions{
 		Query:      query,
 		Categories: searchOpts.Categories,
@@ -149,10 +164,12 @@ func performSearch(query string, config *Config, searchOpts *SearchOptions, mgr 
 		NumResults: config.ResultCount,
 	}
 
-	// If an explicit engine was requested via --engine flag, use only that
+	// If an explicit engine was requested via --engine flag, use only that.
+	// Explicit selection is the user's intent, so the paid-fallback gate does
+	// not apply here (SearchExplicit has no fallback chain).
 	if explicitEngine != "" {
 		results, err := mgr.SearchExplicit(explicitEngine, opts)
-		return results, explicitEngine, err
+		return backends.SearchOutcome{Results: results, Backend: explicitEngine}, err
 	}
 
 	// Otherwise use primary + fallback chain

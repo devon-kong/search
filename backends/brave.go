@@ -37,6 +37,11 @@ func (b *BraveBackend) Name() string {
 	return "brave"
 }
 
+// CostTier reports Brave as free_external (free tier; not gated as paid).
+func (b *BraveBackend) CostTier() string {
+	return CostTierFreeExternal
+}
+
 // IsAvailable checks if Brave API key is configured
 func (b *BraveBackend) IsAvailable() bool {
 	return b.APIKey != ""
@@ -44,8 +49,8 @@ func (b *BraveBackend) IsAvailable() bool {
 
 // braveSearchResponse matches Brave Search API response structure
 type braveSearchResponse struct {
-	Query     braveQuery      `json:"query"`
-	Web       braveWebResults `json:"web"`
+	Query braveQuery      `json:"query"`
+	Web   braveWebResults `json:"web"`
 }
 
 type braveQuery struct {
@@ -77,20 +82,20 @@ func (b *BraveBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	baseURL := b.BaseURL
 	params := url.Values{}
 	params.Set("q", opts.Query)
-	
+
 	// Set result count (max 20)
 	count := opts.NumResults
 	if count <= 0 || count > 20 {
 		count = 10
 	}
 	params.Set("count", fmt.Sprintf("%d", count))
-	
+
 	// Offset for pagination
 	if opts.PageNo > 1 {
 		offset := (opts.PageNo - 1) * count
 		params.Set("offset", fmt.Sprintf("%d", offset))
 	}
-	
+
 	// Safe search
 	safeSearch := "moderate"
 	if opts.SafeSearch == "none" {
@@ -99,7 +104,7 @@ func (b *BraveBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 		safeSearch = "strict"
 	}
 	params.Set("safesearch", safeSearch)
-	
+
 	// Filter by site
 	if opts.Site != "" {
 		params.Set("site", opts.Site)
@@ -124,7 +129,7 @@ func (b *BraveBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	if err != nil {
 		return nil, &BackendError{
 			Backend: b.Name(),
-			Err:     fmt.Errorf("request failed: %v", err),
+			Err:     fmt.Errorf("request failed: %s", RedactSecrets(err.Error())),
 			Code:    ErrCodeNetwork,
 		}
 	}
@@ -144,19 +149,19 @@ func (b *BraveBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 		case 401, 403:
 			return nil, &BackendError{
 				Backend: b.Name(),
-				Err:     fmt.Errorf("authentication failed: %s", string(body)),
+				Err:     fmt.Errorf("authentication failed: %s", TruncateBody(string(body))),
 				Code:    ErrCodeAuth,
 			}
 		case 429:
 			return nil, &BackendError{
 				Backend: b.Name(),
-				Err:     fmt.Errorf("rate limited: %s", string(body)),
+				Err:     fmt.Errorf("rate limited: %s", TruncateBody(string(body))),
 				Code:    ErrCodeRateLimit,
 			}
 		default:
 			return nil, &BackendError{
 				Backend: b.Name(),
-				Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)),
+				Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(body))),
 				Code:    resp.StatusCode,
 			}
 		}

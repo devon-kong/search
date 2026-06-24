@@ -14,14 +14,14 @@ import (
 
 // SearxngBackend implements SearchBackend for SearXNG instances
 type SearxngBackend struct {
-	BaseURL    string
-	Username   string
-	Password   string
-	HTTPMethod string
-	Timeout    time.Duration
+	BaseURL     string
+	Username    string
+	Password    string
+	HTTPMethod  string
+	Timeout     time.Duration
 	NoVerifySSL bool
 	NoUserAgent bool
-	client     *http.Client
+	client      *http.Client
 }
 
 // NewSearxngBackend creates a new SearXNG backend
@@ -54,18 +54,23 @@ func (s *SearxngBackend) Name() string {
 	return "searxng"
 }
 
+// CostTier reports SearXNG as self-hosted (no per-request paid cost).
+func (s *SearxngBackend) CostTier() string {
+	return CostTierSelfHosted
+}
+
 // IsAvailable checks if SearXNG is configured and reachable
 func (s *SearxngBackend) IsAvailable() bool {
 	if s.BaseURL == "" {
 		return false
 	}
-	
+
 	// Try a simple health check or just validate URL is parseable
 	u, err := url.Parse(s.BaseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
 	}
-	
+
 	return true
 }
 
@@ -96,7 +101,7 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 		if err != nil {
 			return nil, &BackendError{
 				Backend: s.Name(),
-				Err:     fmt.Errorf("invalid SearXNG URL: %v", err),
+				Err:     fmt.Errorf("invalid SearXNG URL: %s", RedactSecrets(err.Error())),
 				Code:    ErrCodeInvalidResponse,
 			}
 		}
@@ -141,7 +146,7 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, &BackendError{
 			Backend: s.Name(),
-			Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)),
+			Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(body))),
 			Code:    resp.StatusCode,
 		}
 	}
@@ -205,9 +210,11 @@ func (s *SearxngBackend) buildParams(query string, opts SearchOptions) url.Value
 }
 
 func (s *SearxngBackend) wrapError(err error, code int) *BackendError {
+	// Redact any credentials (e.g. user:pass@ embedded in searxng_url) that may
+	// appear in network/parse errors before they reach output.
 	return &BackendError{
 		Backend: s.Name(),
-		Err:     err,
+		Err:     fmt.Errorf("%s", RedactSecrets(err.Error())),
 		Code:    code,
 	}
 }

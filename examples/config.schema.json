@@ -21,7 +21,13 @@
         "type": "string",
         "enum": ["searxng", "brave", "tavily", "exa", "jina"]
       },
-      "description": "Fallback engines tried in order if primary fails"
+      "default": [],
+      "description": "Fallback engines tried in order if primary fails. Empty by default (no automatic fallback)."
+    },
+    "allow_paid_fallback": {
+      "type": "boolean",
+      "default": false,
+      "description": "Allow automatic fallback to use paid backends (tavily, exa API). When false, paid backends are skipped in the fallback chain even if listed in fallback_engines."
     },
     "searxng_url": {
       "type": "string",
@@ -158,6 +164,11 @@
           "type": "string",
           "description": "Exa API key (or set EXA_API_KEY env var)"
         },
+        "base_url": {
+          "type": "string",
+          "default": "https://api.exa.ai/search",
+          "description": "Override the Exa API endpoint"
+        },
         "mcp_url": {
           "type": "string",
           "description": "MCP HTTP endpoint URL for Exa"
@@ -205,6 +216,11 @@
         "api_key": {
           "type": "string",
           "description": "Brave Search API key (or set BRAVE_API_KEY env var)"
+        },
+        "base_url": {
+          "type": "string",
+          "default": "https://api.search.brave.com/res/v1/web/search",
+          "description": "Override the Brave Search API endpoint"
         }
       },
       "additionalProperties": false
@@ -216,6 +232,11 @@
         "api_key": {
           "type": "string",
           "description": "Tavily API key (or set TAVILY_API_KEY env var)"
+        },
+        "base_url": {
+          "type": "string",
+          "default": "https://api.tavily.com/search",
+          "description": "Override the Tavily API endpoint"
         },
         "search_depth": {
           "type": "string",

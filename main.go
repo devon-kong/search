@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,11 +18,34 @@ import (
 
 const version = "2.4.0"
 
+// Exit codes (documented contract for machine callers):
+//
+//	0 = success
+//	1 = backend or search failure (e.g. all backends failed, no results)
+//	2 = usage / argument / configuration error
+//	3 = validation or health check failure
+const (
+	exitSuccess     = 0
+	exitSearchFail  = 1
+	exitUsageConfig = 2
+	exitCheckFail   = 3
+)
+
 var (
 	config     *Config
 	searchOpts SearchOptions
 	backendMgr *backends.Manager
+	// exitCode is the process exit status; commands set it and main() exits
+	// with it at the end so deferred cleanup and cobra teardown still run.
+	exitCode = exitSuccess
 )
+
+// setExit records the highest-severity exit code seen. Higher numeric codes do
+// not strictly mean more severe, so we simply set it (last writer wins within a
+// single command path, which is sufficient here).
+func setExit(code int) {
+	exitCode = code
+}
 
 // isTerminal checks if the given file is connected to a terminal
 func isTerminal(f *os.File) bool {
@@ -36,14 +60,19 @@ func main() {
 	var err error
 	config, err = loadConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", backends.RedactSecrets(err.Error()))
+		os.Exit(exitUsageConfig)
 	}
 
 	var rootCmd = &cobra.Command{
-		Use:                   "sx [query...]",
-		Short:                 "SearXNG from the command line",
-		Long:                  "sx is a command-line interface for SearXNG search instances, inspired by ddgr and googler.",
+		Use:   "sx [query...]",
+		Short: "Multi-engine web search from the command line",
+		Long: `sx is a command-line web search tool. It defaults to self-hosted SearXNG;
+Brave, Tavily, Exa, and Jina are also supported. Automatic fallback is opt-in
+and paid backends (Tavily, Exa API) are never used without explicit consent.
+
+Use --json for a stable machine-readable envelope. Exit codes: 0 success,
+1 search/backend failure, 2 usage/config error, 3 validation/health failure.`,
 		Version:               version,
 		Run:                   runSearch,
 		Args:                  cobra.ArbitraryArgs,
@@ -103,7 +132,7 @@ func main() {
 			limit, _ := cmd.Flags().GetInt("limit")
 			if err := printHistory(limit); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				setExit(exitSearchFail)
 			}
 		},
 	}
@@ -115,7 +144,7 @@ func main() {
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := clearHistory(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				setExit(exitSearchFail)
 			}
 		},
 	}
@@ -169,25 +198,44 @@ PowerShell:
 
 	rootCmd.AddCommand(historyCmd)
 	rootCmd.AddCommand(completionCmd)
+	rootCmd.AddCommand(newSearchCmd(rootCmd))
+	rootCmd.AddCommand(newConfigCmd())
+	rootCmd.AddCommand(newHealthCmd())
 
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		// cobra reports flag/arg/usage errors here.
+		setExit(exitUsageConfig)
 	}
+
+	os.Exit(exitCode)
 }
 
 func runSearch(cmd *cobra.Command, args []string) {
+	startTime := time.Now()
 	var query string
+
+	// requestedEngine is what the user asked for (explicit --engine, else config
+	// engine, else searxng). Used for the JSON envelope's backend.requested.
+	requestedEngine := searchOpts.ExplicitEngine
+	if requestedEngine == "" {
+		requestedEngine = config.Engine
+	}
+	if requestedEngine == "" {
+		requestedEngine = "searxng"
+	}
 
 	// Check for piped input
 	if isPipeInput() {
 		input, err := readFromStdin()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+			emitUsageFailure(query, requestedEngine, "INVALID_INPUT",
+				fmt.Sprintf("error reading from stdin: %v", err), startTime)
 			return
 		}
 		query = strings.TrimSpace(input)
 		if query == "" {
-			fmt.Fprintf(os.Stderr, "Error: empty input from stdin\n")
+			emitUsageFailure(query, requestedEngine, "INVALID_INPUT",
+				"empty input from stdin", startTime)
 			return
 		}
 	} else if len(args) == 0 {
@@ -197,9 +245,11 @@ func runSearch(cmd *cobra.Command, args []string) {
 		query = strings.Join(args, " ")
 	}
 
-	// Ensure config file exists for actual searches
+	// Ensure config file exists for actual searches. In non-interactive or
+	// --json contexts this must never block on stdin (see ensureConfig).
 	if err := ensureConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating config: %v\n", err)
+		emitUsageFailure(query, requestedEngine, "CONFIG_ERROR",
+			fmt.Sprintf("config error: %v", backends.RedactSecrets(err.Error())), startTime)
 		return
 	}
 
@@ -252,24 +302,20 @@ func runSearch(cmd *cobra.Command, args []string) {
 	}
 
 	// Validate config: require at least one SearXNG instance when using searxng engine
-	engineToUse := searchOpts.ExplicitEngine
-	if engineToUse == "" {
-		engineToUse = config.Engine
-	}
-	if engineToUse == "" {
-		engineToUse = "searxng"
-	}
+	engineToUse := requestedEngine
 	if engineToUse == "searxng" && !hasSearxngConfigured(config) {
-		fmt.Fprintf(os.Stderr, "Error: no SearXNG instance configured (set searxng_url or searxng_urls)\n")
-		fmt.Fprintf(os.Stderr, "Set searxng_url/searxng_urls in config.toml or use --engine brave/tavily/exa/jina\n")
+		emitUsageFailure(query, requestedEngine, "CONFIG_ERROR",
+			"no SearXNG instance configured (set searxng_url or searxng_urls, or use --engine brave/tavily/exa/jina)",
+			startTime)
 		return
 	}
 
 	// Validate categories
 	for _, category := range searchOpts.Categories {
 		if !validateCategory(category) {
-			fmt.Fprintf(os.Stderr, "Error: Invalid category '%s'. Supported categories are: %s\n",
-				category, strings.Join(searxngCategories, ", "))
+			emitUsageFailure(query, requestedEngine, "INVALID_ARGUMENT",
+				fmt.Sprintf("invalid category '%s' (supported: %s)", category, strings.Join(searxngCategories, ", ")),
+				startTime)
 			return
 		}
 	}
@@ -277,8 +323,9 @@ func runSearch(cmd *cobra.Command, args []string) {
 	// Validate time range
 	if searchOpts.TimeRange != "" {
 		if !validateTimeRange(searchOpts.TimeRange) {
-			fmt.Fprintf(os.Stderr, "Error: Invalid time range '%s'. Use: %s\n",
-				searchOpts.TimeRange, strings.Join(timeRangeOptions, ", "))
+			emitUsageFailure(query, requestedEngine, "INVALID_ARGUMENT",
+				fmt.Sprintf("invalid time range '%s' (use: %s)", searchOpts.TimeRange, strings.Join(timeRangeOptions, ", ")),
+				startTime)
 			return
 		}
 		searchOpts.TimeRange = expandTimeRange(searchOpts.TimeRange)
@@ -296,24 +343,31 @@ func runSearch(cmd *cobra.Command, args []string) {
 	startAt := 0
 	var allResults []SearchResult
 	var usedEngine string
+	var outcome backends.SearchOutcome
 
 	for {
 		// Fetch results until we have enough
 		for len(allResults) < startAt+config.ResultCount {
-			results, engine, err := performSearch(query, config, &searchOpts, backendMgr, searchOpts.ExplicitEngine)
+			oc, err := performSearch(query, config, &searchOpts, backendMgr, searchOpts.ExplicitEngine)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Search error: %v\n", err)
+				// Surface any warnings (e.g. paid fallback skipped) to stderr.
+				for _, w := range oc.Warnings {
+					fmt.Fprintf(os.Stderr, "Warning: %s\n", backends.RedactSecrets(w))
+				}
+				emitSearchFailure(query, requestedEngine, err, oc.Warnings, startTime)
 				return
 			}
+			// Capture metadata from the first successful page.
 			if usedEngine == "" {
-				usedEngine = engine
+				usedEngine = oc.Backend
+				outcome = oc
 			}
 
-			if len(results) == 0 {
+			if len(oc.Results) == 0 {
 				break
 			}
 
-			allResults = append(allResults, results...)
+			allResults = append(allResults, oc.Results...)
 			if config.ResultCount == 0 {
 				break
 			}
@@ -321,27 +375,19 @@ func runSearch(cmd *cobra.Command, args []string) {
 		}
 
 		if len(allResults) == 0 {
-			fmt.Println("No results found or an error occurred during the search.")
+			// No results is not an error; emit an empty success envelope in
+			// --json mode, otherwise the human message. Exit code stays 0.
+			if searchOpts.JSON {
+				emitSearchSuccess(query, requestedEngine, outcome, nil, startTime)
+			} else {
+				fmt.Println("No results found or an error occurred during the search.")
+			}
 			return
 		}
 
 		// Handle special output formats
 		if searchOpts.JSON {
-			if searchOpts.OutputFile != "" {
-				if err := printJSONToFile(allResults, searchOpts.OutputFile, query, searchOpts.Clean); err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing JSON to file: %v\n", err)
-				}
-			} else {
-				if searchOpts.Clean {
-					if err := printJSONResultsClean(allResults, query); err != nil {
-						fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
-					}
-				} else {
-					if err := printJSONResults(allResults, query); err != nil {
-						fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
-					}
-				}
-			}
+			emitSearchSuccess(query, requestedEngine, outcome, allResults, startTime)
 			return
 		}
 
@@ -433,6 +479,123 @@ func runSearch(cmd *cobra.Command, args []string) {
 			return
 		}
 	}
+}
+
+// costTierForBackend resolves a backend's cost tier from the manager registry,
+// returning "" when unknown (e.g. before the manager is built).
+func costTierForBackend(name string) string {
+	if backendMgr == nil || name == "" {
+		return ""
+	}
+	if b, ok := backendMgr.GetBackend(name); ok {
+		return b.CostTier()
+	}
+	return ""
+}
+
+// emitSearchSuccess writes a success JSON envelope (stdout or --output file).
+func emitSearchSuccess(query, requested string, outcome backends.SearchOutcome, results []SearchResult, startTime time.Time) {
+	used := outcome.Backend
+	if used == "" {
+		used = requested
+	}
+	env := &JSONEnvelope{
+		OK:    true,
+		Query: query,
+		Backend: jsonBackendMeta{
+			Requested:      requested,
+			Used:           &used,
+			FallbackUsed:   outcome.FallbackUsed,
+			FallbackReason: backends.RedactSecrets(outcome.FallbackReason),
+			CostTier:       costTierForBackend(used),
+		},
+		Timing:   jsonTiming{TotalMs: time.Since(startTime).Milliseconds()},
+		Results:  buildResultsForJSON(results, searchOpts.Clean),
+		Warnings: redactWarnings(outcome.Warnings),
+		Error:    nil,
+	}
+	if searchOpts.OutputFile != "" {
+		if err := writeJSONEnvelopeToFile(env, searchOpts.OutputFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing JSON to file: %v\n", err)
+			setExit(exitSearchFail)
+		}
+		return
+	}
+	if err := writeJSONEnvelope(env); err != nil {
+		fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+		setExit(exitSearchFail)
+	}
+}
+
+// emitSearchFailure writes a backend/search failure: structured JSON envelope in
+// --json mode (exit 1), otherwise the original stderr message (exit 1).
+func emitSearchFailure(query, requested string, searchErr error, warnings []string, startTime time.Time) {
+	setExit(exitSearchFail)
+	if !searchOpts.JSON {
+		fmt.Fprintf(os.Stderr, "Search error: %v\n", backends.RedactSecrets(searchErr.Error()))
+		return
+	}
+	jerr := buildJSONError(searchErr, requested)
+	env := &JSONEnvelope{
+		OK:    false,
+		Query: query,
+		Backend: jsonBackendMeta{
+			Requested:    requested,
+			Used:         nil, // null: no backend succeeded
+			FallbackUsed: false,
+			CostTier:     costTierForBackend(requested),
+		},
+		Timing:   jsonTiming{TotalMs: time.Since(startTime).Milliseconds()},
+		Results:  []SearchResult{},
+		Warnings: redactWarnings(warnings),
+		Error:    jerr,
+	}
+	if err := writeJSONEnvelope(env); err != nil {
+		fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+	}
+}
+
+// emitUsageFailure writes a usage/argument/config failure: structured JSON
+// envelope in --json mode, otherwise stderr text. Exit code 2.
+func emitUsageFailure(query, requested, code, message string, startTime time.Time) {
+	setExit(exitUsageConfig)
+	if !searchOpts.JSON {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", backends.RedactSecrets(message))
+		return
+	}
+	env := &JSONEnvelope{
+		OK:    false,
+		Query: query,
+		Backend: jsonBackendMeta{
+			Requested: requested,
+			Used:      nil,
+			CostTier:  costTierForBackend(requested),
+		},
+		Timing:  jsonTiming{TotalMs: time.Since(startTime).Milliseconds()},
+		Results: []SearchResult{},
+		Error: &jsonError{
+			Code:              code,
+			Message:           backends.RedactSecrets(message),
+			Backend:           requested,
+			Retryable:         false,
+			RetryAfterSeconds: nil,
+		},
+	}
+	if err := writeJSONEnvelope(env); err != nil {
+		fmt.Fprintf(os.Stderr, "Error formatting JSON: %v\n", err)
+	}
+}
+
+// redactWarnings applies secret redaction to each warning string.
+func redactWarnings(warnings []string) []string {
+	if len(warnings) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(warnings))
+	for i, w := range warnings {
+		out[i] = backends.RedactSecrets(w)
+	}
+	return out
 }
 
 func handleInteractiveSession(query *string, allResults *[]SearchResult, startAt *int, opts *SearchOptions) bool {

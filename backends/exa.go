@@ -60,6 +60,22 @@ func (e *ExaBackend) Name() string {
 	return "exa"
 }
 
+// CostTier reports Exa's cost dynamically by mode: the direct API consumes
+// paid credits, MCP is free_external. In auto mode the API is tried first, so
+// we conservatively report paid to avoid silently spending credits on fallback.
+func (e *ExaBackend) CostTier() string {
+	switch e.Mode {
+	case ExaModeAPI:
+		return CostTierPaid
+	case ExaModeMCP:
+		return CostTierFreeExternal
+	case ExaModeAuto:
+		fallthrough
+	default:
+		return CostTierPaid
+	}
+}
+
 func (e *ExaBackend) IsAvailable() bool {
 	switch e.Mode {
 	case ExaModeAPI:
@@ -142,7 +158,7 @@ func (e *ExaBackend) searchAPI(query string, count int) ([]SearchResult, error) 
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, &BackendError{Backend: e.Name(), Err: err, Code: ErrCodeNetwork}
+		return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("%s", RedactSecrets(err.Error())), Code: ErrCodeNetwork}
 	}
 	defer resp.Body.Close()
 
@@ -152,12 +168,12 @@ func (e *ExaBackend) searchAPI(query string, count int) ([]SearchResult, error) 
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("authentication failed: %s", string(body)), Code: ErrCodeAuth}
+			return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("authentication failed: %s", TruncateBody(string(body))), Code: ErrCodeAuth}
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("rate limited: %s", string(body)), Code: ErrCodeRateLimit}
+			return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("rate limited: %s", TruncateBody(string(body))), Code: ErrCodeRateLimit}
 		}
-		return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)), Code: resp.StatusCode}
+		return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(body))), Code: resp.StatusCode}
 	}
 
 	var parsed exaAPIResponse
@@ -204,7 +220,7 @@ func (e *ExaBackend) searchMCP(query string, count int) ([]SearchResult, error) 
 		"numResults":  count,
 	})
 	if err != nil {
-		return nil, &BackendError{Backend: e.Name(), Err: err, Code: ErrCodeNetwork}
+		return nil, &BackendError{Backend: e.Name(), Err: fmt.Errorf("%s", RedactSecrets(err.Error())), Code: ErrCodeNetwork}
 	}
 
 	var toolResult mcpToolCallResult
