@@ -33,16 +33,12 @@ This is a Go port of the original Python [searxngr](https://github.com/scross01/
 
 ## Installation
 
-```shell
-go install github.com/your-repo/sx@latest
-```
-
-Or build from source:
+Build from source (the Go module is named `sx`):
 
 ```shell
-git clone https://github.com/your-repo/sx.git
+git clone <repo-url> sx
 cd sx
-go build -o sx .
+go build -o sx .          # then move ./sx onto your PATH
 ```
 
 ## Configuration
@@ -92,20 +88,20 @@ no_color = false
 debug = false
 
 # Output defaults
-# default_output = ""       # "interactive" to default to interactive mode
+# default_output = "interactive"   # make interactive the default (pipes and --json still force non-interactive)
 history_enabled = true
 max_history = 100
 
 # Brave Search API (https://api.search.brave.com/)
 # Free tier: 2,000 requests/month
 [engines_brave]
-api_key = ""  # or set BRAVE_API_KEY env var
+api_key = ""  # BRAVE_API_KEY env var overrides this when set
 # base_url = "https://api.search.brave.com/res/v1/web/search"  # override endpoint
 
 # Tavily Search API (https://tavily.com/) -- PAID backend (>= 1 credit/search)
 # Free tier: 1,000 credits/month
 [engines_tavily]
-api_key = ""                  # or set TAVILY_API_KEY env var
+api_key = ""                  # TAVILY_API_KEY env var overrides this when set
 # base_url = "https://api.tavily.com/search"  # override endpoint
 search_depth = "basic"        # basic (1 credit) or advanced (2 credits)
 include_raw_content = false   # return full page content with results
@@ -114,7 +110,7 @@ include_answer = false        # return a direct answer
 # Exa Search (API + MCP). API mode is paid; MCP mode is free_external.
 [engines_exa]
 mode = "auto"                # auto, api, mcp
-api_key = ""                 # or set EXA_API_KEY env var
+api_key = ""                 # EXA_API_KEY env var overrides this when set
 # base_url = "https://api.exa.ai/search"  # override API endpoint
 mcp_url = ""                 # optional MCP HTTP endpoint
 mcp_tool = "exa-web-search"  # MCP tool name
@@ -122,7 +118,7 @@ num_results = 10
 
 # Jina Search
 [engines_jina]
-api_key = ""                 # or set JINA_API_KEY env var
+api_key = ""                 # JINA_API_KEY env var overrides this when set
 allow_keyless = true
 base_url = "https://s.jina.ai"
 ```
@@ -136,6 +132,9 @@ export EXA_API_KEY="your-exa-key"
 export JINA_API_KEY="your-jina-key"
 ```
 
+When set (non-empty), each environment variable **overrides** the corresponding
+`api_key` in `config.toml`. This applies to Brave, Tavily, Exa, and Jina.
+
 ## Usage
 
 ### Basic Search
@@ -143,6 +142,9 @@ export JINA_API_KEY="your-jina-key"
 ```shell
 sx "why is the sky blue"
 sx "golang tutorials" -n 5
+
+# The query can also come from stdin (useful in pipelines)
+echo "rust ownership model" | sx --json
 ```
 
 ### Select Backend and SearXNG Engines
@@ -222,7 +224,7 @@ sx "query" -S              # social media
 sx "query" -F              # files
 
 # Filtering
-sx "query" -r week         # time range: day, week, month, year
+sx "query" -r week         # time range: day, week, month, year (or d, w, m, y)
 sx "query" -w example.com  # site-specific search
 sx "query" --safe-search none
 
@@ -259,10 +261,39 @@ sx config validate         # check config; no network requests; exit 3 on error
 sx health                  # report backend availability (no live requests)
 sx health --live           # live reachability check (warns before paid backends)
 
-# Shell completions
+# Shell completions (run `sx completion --help` for per-shell install steps)
 sx completion bash
 sx completion zsh
+sx completion fish
+sx completion powershell
 ```
+
+### Interactive Mode
+
+Run `sx "query" -i` (or set `default_output = "interactive"`) to enter an
+interactive prompt after the first page of results. Piped output and special
+output modes (`--json`, `-L`, `-H`, `-T`, `--top`) always force non-interactive.
+At the prompt:
+
+- type a new query to search again
+- `n` / `p` / `f` — next / previous / first page
+- a number (e.g. `3`) — open that result in the browser
+- `c N` — print the URL of result N
+- `j N` — print the JSON for result N
+- `r <range>` — change the time range (`day`/`week`/`month`/`year` or `d`/`w`/`m`/`y`)
+- `site:example.com` — restrict to a site and re-search
+- `x` — toggle full-URL display
+- `d` — toggle debug output
+- `?` — show in-prompt help
+- `q` / `quit` / `exit` — leave interactive mode
+
+### SearXNG Raw JSON
+
+`sx searxng raw "query"` returns SearXNG's own JSON response body verbatim. It
+does **not** wrap results in the sx envelope, does **not** support `--clean`, and
+never triggers paid fallback. Flags: `--categories`, `-N/--news`, `-e/--engines`,
+`-l/--language`, `--safe-search`, `-r/--time-range`, `-n/--num`. The query may
+also be piped on stdin.
 
 ### SearXNG Engine Inventory
 
@@ -309,12 +340,17 @@ Each engine object carries `name`, `shortcut`, `categories`, `enabled`,
 `timeout`, `paging`, `safesearch`, `time_range_support`, `language_support`, and
 (only with `--live`) a `live` object with `ok`, `result_count`, and `error`.
 
-### All Flags
+### Command-line flags (root command)
+
+These flags apply to the root search command (and to its alias `sx search`).
+This is a hand-maintained reference, not verbatim `--help` output. Subcommands
+(`sx searxng raw`, `sx searxng engines`, `sx health`) have their own flags — see
+the sections above or run `sx <command> --help`.
 
 ```
 Flags:
       --categories strings   search categories (general, news, videos, images, music, etc.)
-      --clean                omit empty/null values in JSON output
+  -c, --clean                omit empty/null values in JSON output
       --debug                show debug output
       --diagnostics          include SearXNG diagnostics in --json output
   -e, --engines strings      SearXNG upstream engines to request
@@ -335,7 +371,7 @@ Flags:
       --no-verify-ssl        skip SSL verification
       --nocolor              disable colors
       --noua                 disable user agent
-  -n, --num int              results per page (default 10)
+  -n, --num int              results per page (default 10; 0 returns all results from one page)
   -o, --output string        save output to file
       --safe-search string      none, moderate, strict (default "strict")
       --searxng-strategy string SearXNG instance strategy (ordered, parallel-fastest)
@@ -345,7 +381,7 @@ Flags:
   -S, --social               social media category shortcut
       --strict-engines       warn if requested SearXNG engines are unresponsive or results include other engines
   -T, --text                 fetch pages and convert to markdown
-  -r, --time-range string    day, week, month, year
+  -r, --time-range string    day, week, month, year (also accepts d, w, m, y)
       --timeout float        request timeout in seconds (default 30)
       --top                  show only top result
       --unsafe               disable safe search
@@ -468,6 +504,9 @@ Failure:
 }
 ```
 
+On a multi-backend failure, `message` is a multi-line string that lists every
+backend that was tried (the example above is abbreviated to one line).
+
 `error.code` is one of `BACKEND_UNAVAILABLE`, `NETWORK`, `AUTH`, `RATE_LIMIT`,
 `INVALID_RESPONSE` (plus `CONFIG_ERROR` / `INVALID_ARGUMENT` / `INVALID_INPUT`
 for usage errors). `retry_after_seconds` is always `null` in this release (no
@@ -488,6 +527,11 @@ credential-bearing URLs are redacted from all output.
 sx maps the core search parameters of each backend. Some officially supported
 parameters are intentionally **not** implemented in this phase (documented gaps,
 not silent omissions):
+
+> Per-backend coverage: `--categories`, `--engines`, `--language`,
+> `--safe-search`, and `-r/--time-range` are SearXNG-oriented. Brave honors
+> safe-search (mapped to none/moderate/strict); Tavily, Exa, and Jina ignore
+> safe-search, categories, engines, and time-range.
 
 - **SearXNG:** covered -- `q`, `categories`, `engines`, `language`, `pageno`,
   `time_range`, `safesearch`, `num`, `format=json`. Not exposed (UI/instance-level,
