@@ -68,6 +68,18 @@ func (m *MultiSearxngBackend) IsAvailable() bool {
 }
 
 func (m *MultiSearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
+	raw, err := m.SearchRaw(opts)
+	if err != nil {
+		return nil, err
+	}
+	return raw.Results, nil
+}
+
+// SearchRaw searches one or more SearXNG instances and returns the raw JSON
+// body from the instance selected by the configured strategy.
+func (m *MultiSearxngBackend) SearchRaw(opts SearchOptions) (SearxngRawResponse, error) {
+	var out SearxngRawResponse
+
 	available := make([]*SearxngBackend, 0, len(m.instances))
 	for _, instance := range m.instances {
 		if instance.IsAvailable() {
@@ -76,7 +88,7 @@ func (m *MultiSearxngBackend) Search(opts SearchOptions) ([]SearchResult, error)
 	}
 
 	if len(available) == 0 {
-		return nil, &BackendError{
+		return out, &BackendError{
 			Backend: m.Name(),
 			Err:     fmt.Errorf("no reachable SearXNG instances configured"),
 			Code:    ErrCodeUnavailable,
@@ -85,25 +97,33 @@ func (m *MultiSearxngBackend) Search(opts SearchOptions) ([]SearchResult, error)
 
 	switch m.strategy {
 	case SearxngStrategyParallelFastest:
-		return m.searchParallelFastest(available, opts)
+		return m.searchRawParallelFastest(available, opts)
 	case SearxngStrategyOrdered:
 		fallthrough
 	default:
-		return m.searchOrdered(available, opts)
+		return m.searchRawOrdered(available, opts)
 	}
 }
 
 func (m *MultiSearxngBackend) searchOrdered(instances []*SearxngBackend, opts SearchOptions) ([]SearchResult, error) {
+	raw, err := m.searchRawOrdered(instances, opts)
+	if err != nil {
+		return nil, err
+	}
+	return raw.Results, nil
+}
+
+func (m *MultiSearxngBackend) searchRawOrdered(instances []*SearxngBackend, opts SearchOptions) (SearxngRawResponse, error) {
 	var errs []error
 	for _, instance := range instances {
-		results, err := instance.Search(opts)
+		raw, err := instance.SearchRaw(opts)
 		if err == nil {
-			return results, nil
+			return raw, nil
 		}
 		errs = append(errs, err)
 	}
 
-	return nil, &BackendError{
+	return SearxngRawResponse{}, &BackendError{
 		Backend: m.Name(),
 		Err:     fmt.Errorf("all SearXNG instances failed (%d)", len(errs)),
 		Code:    ErrCodeNetwork,
@@ -111,9 +131,17 @@ func (m *MultiSearxngBackend) searchOrdered(instances []*SearxngBackend, opts Se
 }
 
 func (m *MultiSearxngBackend) searchParallelFastest(instances []*SearxngBackend, opts SearchOptions) ([]SearchResult, error) {
+	raw, err := m.searchRawParallelFastest(instances, opts)
+	if err != nil {
+		return nil, err
+	}
+	return raw.Results, nil
+}
+
+func (m *MultiSearxngBackend) searchRawParallelFastest(instances []*SearxngBackend, opts SearchOptions) (SearxngRawResponse, error) {
 	type result struct {
-		results []SearchResult
-		err     error
+		raw SearxngRawResponse
+		err error
 	}
 
 	ch := make(chan result, len(instances))
@@ -121,8 +149,8 @@ func (m *MultiSearxngBackend) searchParallelFastest(instances []*SearxngBackend,
 	for _, instance := range instances {
 		inst := instance
 		go func() {
-			results, err := inst.Search(opts)
-			ch <- result{results: results, err: err}
+			raw, err := inst.SearchRaw(opts)
+			ch <- result{raw: raw, err: err}
 		}()
 	}
 
@@ -130,12 +158,12 @@ func (m *MultiSearxngBackend) searchParallelFastest(instances []*SearxngBackend,
 	for i := 0; i < len(instances); i++ {
 		res := <-ch
 		if res.err == nil {
-			return res.results, nil
+			return res.raw, nil
 		}
 		errs = append(errs, res.err)
 	}
 
-	return nil, &BackendError{
+	return SearxngRawResponse{}, &BackendError{
 		Backend: m.Name(),
 		Err:     fmt.Errorf("all SearXNG instances failed (%d)", len(errs)),
 		Code:    ErrCodeNetwork,

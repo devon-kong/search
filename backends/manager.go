@@ -21,6 +21,7 @@ type SearchOutcome struct {
 	FallbackUsed   bool     // true if a fallback (not the primary) served the request
 	FallbackReason string   // human-readable reason describing fallback/skip decisions
 	Warnings       []string // non-fatal notes (e.g. paid backends skipped)
+	Diagnostics    *SearxngDiagnostics
 }
 
 // NewManager creates a new backend manager
@@ -78,11 +79,12 @@ func (m *Manager) Search(opts SearchOptions) (SearchOutcome, error) {
 	}
 
 	// Try primary backend first
-	results, err := m.primary.Search(opts)
+	results, diagnostics, err := searchBackendWithDiagnostics(m.primary, opts)
 	if err == nil {
 		return SearchOutcome{
-			Results: results,
-			Backend: m.primary.Name(),
+			Results:     results,
+			Backend:     m.primary.Name(),
+			Diagnostics: diagnostics,
 		}, nil
 	}
 
@@ -104,7 +106,7 @@ func (m *Manager) Search(opts SearchOptions) (SearchOutcome, error) {
 			continue
 		}
 
-		results, fbErr := fb.Search(opts)
+		results, diagnostics, fbErr := searchBackendWithDiagnostics(fb, opts)
 		if fbErr == nil {
 			return SearchOutcome{
 				Results:        results,
@@ -112,6 +114,7 @@ func (m *Manager) Search(opts SearchOptions) (SearchOutcome, error) {
 				FallbackUsed:   true,
 				FallbackReason: fmt.Sprintf("primary %q failed: %v", m.primary.Name(), err),
 				Warnings:       warnings,
+				Diagnostics:    diagnostics,
 			}, nil
 		}
 		errors = append(errors, fbErr.Error())
@@ -138,14 +141,32 @@ func (a *aggregateError) Unwrap() error { return a.primary }
 
 // SearchExplicit searches using a specific backend by name (no fallback)
 func (m *Manager) SearchExplicit(name string, opts SearchOptions) ([]SearchResult, error) {
+	outcome, err := m.SearchExplicitOutcome(name, opts)
+	if err != nil {
+		return nil, err
+	}
+	return outcome.Results, nil
+}
+
+// SearchExplicitOutcome searches using a specific backend by name (no fallback)
+// and returns backend metadata plus any SearXNG diagnostics.
+func (m *Manager) SearchExplicitOutcome(name string, opts SearchOptions) (SearchOutcome, error) {
 	backend, ok := m.registry[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown backend: %s (available: %s)", name, m.availableNames())
+		return SearchOutcome{}, fmt.Errorf("unknown backend: %s (available: %s)", name, m.availableNames())
 	}
 	if !backend.IsAvailable() {
-		return nil, fmt.Errorf("backend %s is not configured (missing API key?)", name)
+		return SearchOutcome{}, fmt.Errorf("backend %s is not configured (missing API key?)", name)
 	}
-	return backend.Search(opts)
+	results, diagnostics, err := searchBackendWithDiagnostics(backend, opts)
+	if err != nil {
+		return SearchOutcome{}, err
+	}
+	return SearchOutcome{
+		Results:     results,
+		Backend:     backend.Name(),
+		Diagnostics: diagnostics,
+	}, nil
 }
 
 // GetBackend returns a backend by name
@@ -176,4 +197,22 @@ func (m *Manager) ConfiguredBackends() []string {
 
 func (m *Manager) availableNames() string {
 	return strings.Join(m.AvailableBackends(), ", ")
+}
+
+type searxngRawSearcher interface {
+	SearchRaw(opts SearchOptions) (SearxngRawResponse, error)
+}
+
+func searchBackendWithDiagnostics(backend SearchBackend, opts SearchOptions) ([]SearchResult, *SearxngDiagnostics, error) {
+	if rawBackend, ok := backend.(searxngRawSearcher); ok {
+		raw, err := rawBackend.SearchRaw(opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		diagnostics := raw.Diagnostics
+		return raw.Results, &diagnostics, nil
+	}
+
+	results, err := backend.Search(opts)
+	return results, nil, err
 }

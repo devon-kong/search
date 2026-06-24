@@ -86,8 +86,10 @@ Use --json for a stable machine-readable envelope. Exit codes: 0 success,
 	rootCmd.Flags().StringSliceVar(&searchOpts.Categories, "categories", nil, fmt.Sprintf("list of categories to search in: %s", strings.Join(searxngCategories, ", ")))
 	rootCmd.Flags().BoolVar(&searchOpts.JSON, "json", false, "output search results in JSON format")
 	rootCmd.Flags().BoolVarP(&searchOpts.Clean, "clean", "c", false, "omit empty and null values in JSON output")
-	rootCmd.Flags().StringSliceVarP(&searchOpts.SearxngEngines, "engines", "e", nil, "list of SearXNG engines to use for search")
-	rootCmd.Flags().StringVar(&searchOpts.ExplicitEngine, "engine", "", fmt.Sprintf("search backend to use (%s)", validEngineNames()))
+	rootCmd.Flags().BoolVar(&searchOpts.Diagnostics, "diagnostics", false, "include SearXNG diagnostics in --json output")
+	rootCmd.Flags().StringSliceVarP(&searchOpts.SearxngEngines, "engines", "e", nil, "SearXNG upstream engines to request (for example google, duckduckgo, google news)")
+	rootCmd.Flags().StringVar(&searchOpts.ExplicitEngine, "engine", "", fmt.Sprintf("sx search backend to use (%s)", validEngineNames()))
+	rootCmd.Flags().BoolVar(&searchOpts.StrictEngines, "strict-engines", false, "warn when requested SearXNG engines are unresponsive or results include other engines")
 	rootCmd.Flags().BoolVarP(&searchOpts.Expand, "expand", "x", config.Expand, "show complete URL in search results (URLs are shown by default)")
 	rootCmd.Flags().BoolVarP(&searchOpts.First, "first", "j", false, "open the first result in web browser and exit")
 	rootCmd.Flags().StringVar(&config.HTTPMethod, "http-method", config.HTTPMethod, "HTTP method to use for search requests (GET or POST)")
@@ -120,7 +122,7 @@ Use --json for a stable machine-readable envelope. Exit codes: 0 success,
 	var files, music, news, social, videos bool
 	rootCmd.Flags().BoolVarP(&files, "files", "F", false, "show results from files section")
 	rootCmd.Flags().BoolVarP(&music, "music", "M", false, "show results from music section")
-	rootCmd.Flags().BoolVarP(&news, "news", "N", false, "show results from news section")
+	rootCmd.Flags().BoolVarP(&news, "news", "N", false, "shortcut for --categories news")
 	rootCmd.Flags().BoolVarP(&social, "social", "S", false, "show results from social media section")
 	rootCmd.Flags().BoolVarP(&videos, "videos", "V", false, "show results from videos section")
 
@@ -199,6 +201,7 @@ PowerShell:
 	rootCmd.AddCommand(historyCmd)
 	rootCmd.AddCommand(completionCmd)
 	rootCmd.AddCommand(newSearchCmd(rootCmd))
+	rootCmd.AddCommand(newSearxngCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newHealthCmd())
 
@@ -357,10 +360,21 @@ func runSearch(cmd *cobra.Command, args []string) {
 				emitSearchFailure(query, requestedEngine, err, oc.Warnings, startTime)
 				return
 			}
+			if searchOpts.StrictEngines && len(searchOpts.SearxngEngines) > 0 && oc.Backend == "searxng" {
+				applyStrictEngineWarnings(&oc, searchOpts.SearxngEngines)
+			}
 			// Capture metadata from the first successful page.
 			if usedEngine == "" {
 				usedEngine = oc.Backend
 				outcome = oc
+			} else {
+				outcome.Warnings = appendUniqueStrings(outcome.Warnings, oc.Warnings...)
+				if outcome.Diagnostics != nil && oc.Diagnostics != nil {
+					outcome.Diagnostics.StrictEnginesWarnings = appendUniqueStrings(
+						outcome.Diagnostics.StrictEnginesWarnings,
+						oc.Diagnostics.StrictEnginesWarnings...,
+					)
+				}
 			}
 
 			if len(oc.Results) == 0 {
@@ -378,7 +392,7 @@ func runSearch(cmd *cobra.Command, args []string) {
 			// No results is not an error; emit an empty success envelope in
 			// --json mode, otherwise the human message. Exit code stays 0.
 			if searchOpts.JSON {
-				emitSearchSuccess(query, requestedEngine, outcome, nil, startTime)
+				emitSearchSuccess(query, requestedEngine, outcome, []SearchResult{}, startTime)
 			} else {
 				fmt.Println("No results found or an error occurred during the search.")
 			}
@@ -514,6 +528,9 @@ func emitSearchSuccess(query, requested string, outcome backends.SearchOutcome, 
 		Warnings: redactWarnings(outcome.Warnings),
 		Error:    nil,
 	}
+	if searchOpts.Diagnostics && outcome.Diagnostics != nil {
+		env.Diagnostics = diagnosticsForJSON(outcome.Diagnostics)
+	}
 	if searchOpts.OutputFile != "" {
 		if err := writeJSONEnvelopeToFile(env, searchOpts.OutputFile); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing JSON to file: %v\n", err)
@@ -596,6 +613,15 @@ func redactWarnings(warnings []string) []string {
 		out[i] = backends.RedactSecrets(w)
 	}
 	return out
+}
+
+func diagnosticsForJSON(diagnostics *backends.SearxngDiagnostics) *backends.SearxngDiagnostics {
+	if diagnostics == nil {
+		return nil
+	}
+	out := *diagnostics
+	out.StrictEnginesWarnings = redactWarnings(out.StrictEnginesWarnings)
+	return &out
 }
 
 func handleInteractiveSession(query *string, allResults *[]SearchResult, startAt *int, opts *SearchOptions) bool {

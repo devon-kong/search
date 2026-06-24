@@ -81,6 +81,55 @@ func TestJSONEnvelope_SuccessSchema(t *testing.T) {
 	}
 }
 
+func TestJSONEnvelope_DiagnosticsOmittedByDefault(t *testing.T) {
+	used := "searxng"
+	env := &JSONEnvelope{
+		OK:    true,
+		Query: "golang",
+		Backend: jsonBackendMeta{
+			Requested: "searxng",
+			Used:      &used,
+		},
+		Timing:   jsonTiming{TotalMs: 1},
+		Results:  []SearchResult{},
+		Warnings: []string{},
+		Error:    nil,
+	}
+	m := decodeEnvelope(t, env)
+	if _, ok := m["diagnostics"]; ok {
+		t.Fatalf("diagnostics should be omitted by default, got %v", m["diagnostics"])
+	}
+}
+
+func TestJSONEnvelope_DiagnosticsIncludedWhenSet(t *testing.T) {
+	used := "searxng"
+	env := &JSONEnvelope{
+		OK:    true,
+		Query: "golang",
+		Backend: jsonBackendMeta{
+			Requested: "searxng",
+			Used:      &used,
+		},
+		Timing:   jsonTiming{TotalMs: 1},
+		Results:  []SearchResult{},
+		Warnings: []string{},
+		Diagnostics: &backends.SearxngDiagnostics{
+			Answers:             json.RawMessage(`[]`),
+			Suggestions:         json.RawMessage(`["go"]`),
+			Infoboxes:           json.RawMessage(`[]`),
+			UnresponsiveEngines: json.RawMessage(`[]`),
+			NumberOfResults:     0,
+		},
+		Error: nil,
+	}
+	m := decodeEnvelope(t, env)
+	diagnostics, ok := m["diagnostics"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("diagnostics should be an object, got %T", m["diagnostics"])
+	}
+	requireKeys(t, diagnostics, "answers", "suggestions", "infoboxes", "unresponsive_engines", "number_of_results")
+}
+
 func TestJSONEnvelope_FailureSchema(t *testing.T) {
 	env := &JSONEnvelope{
 		OK:    false,
@@ -205,6 +254,28 @@ func TestBuildResultsForJSON_CleanOmitsEmpty(t *testing.T) {
 	}
 	if cleaned[0]["title"] != "T" {
 		t.Errorf("title should be present, got %v", cleaned[0])
+	}
+}
+
+func TestBuildResultsForJSON_EmptyResultsNeverNull(t *testing.T) {
+	for _, clean := range []bool{false, true} {
+		env := &JSONEnvelope{
+			OK:       true,
+			Query:    "empty",
+			Backend:  jsonBackendMeta{Requested: "searxng"},
+			Timing:   jsonTiming{TotalMs: 1},
+			Results:  buildResultsForJSON(nil, clean),
+			Warnings: []string{},
+			Error:    nil,
+		}
+		m := decodeEnvelope(t, env)
+		results, ok := m["results"].([]interface{})
+		if !ok {
+			t.Fatalf("clean=%v: results should be an array, got %T (%v)", clean, m["results"], m["results"])
+		}
+		if len(results) != 0 {
+			t.Fatalf("clean=%v: expected empty results array, got %v", clean, results)
+		}
 	}
 }
 

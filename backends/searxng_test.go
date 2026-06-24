@@ -82,6 +82,73 @@ func TestSearxngBackend_Search_GET(t *testing.T) {
 	}
 }
 
+func TestSearxngBackend_SearchRaw_ReturnsRawAndDiagnostics(t *testing.T) {
+	rawBody := `{
+		"results": [
+			{
+				"title": "Go Dev",
+				"url": "https://go.dev",
+				"content": "Official Go site",
+				"engine": "google",
+				"engines": ["google"]
+			}
+		],
+		"answers": [{"answer": "42"}],
+		"suggestions": ["golang"],
+		"infoboxes": [{"id": "go"}],
+		"unresponsive_engines": [["bing", "timeout"]],
+		"number_of_results": 123
+	}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(rawBody))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	raw, err := b.SearchRaw(SearchOptions{Query: "golang"})
+	if err != nil {
+		t.Fatalf("SearchRaw failed: %v", err)
+	}
+	if string(raw.Raw) != rawBody {
+		t.Fatalf("raw body mismatch:\ngot  %s\nwant %s", raw.Raw, rawBody)
+	}
+	if len(raw.Results) != 1 || raw.Results[0].Title != "Go Dev" {
+		t.Fatalf("unexpected parsed results: %#v", raw.Results)
+	}
+	if raw.Diagnostics.NumberOfResults != 123 {
+		t.Fatalf("number_of_results = %d, want 123", raw.Diagnostics.NumberOfResults)
+	}
+	if string(raw.Diagnostics.Answers) != `[{"answer": "42"}]` {
+		t.Fatalf("answers raw mismatch: %s", raw.Diagnostics.Answers)
+	}
+	if string(raw.Diagnostics.UnresponsiveEngines) != `[["bing", "timeout"]]` {
+		t.Fatalf("unresponsive raw mismatch: %s", raw.Diagnostics.UnresponsiveEngines)
+	}
+}
+
+func TestSearxngBackend_SearchRaw_MissingDiagnosticsDefaultsToArrays(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	raw, err := b.SearchRaw(SearchOptions{Query: "empty"})
+	if err != nil {
+		t.Fatalf("SearchRaw failed: %v", err)
+	}
+	if len(raw.Results) != 0 {
+		t.Fatalf("expected empty results, got %#v", raw.Results)
+	}
+	if string(raw.Diagnostics.Answers) != `[]` ||
+		string(raw.Diagnostics.Suggestions) != `[]` ||
+		string(raw.Diagnostics.Infoboxes) != `[]` ||
+		string(raw.Diagnostics.UnresponsiveEngines) != `[]` {
+		t.Fatalf("missing diagnostics should default to arrays, got %#v", raw.Diagnostics)
+	}
+}
+
 func TestSearxngBackend_Search_POST(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -182,6 +249,62 @@ func TestSearxngBackend_Search_WithTimeRange(t *testing.T) {
 
 	if capturedTimeRange != "week" {
 		t.Errorf("expected 'week', got %q", capturedTimeRange)
+	}
+}
+
+func TestSearxngBackend_Search_WithSearxngOptions(t *testing.T) {
+	var captured map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = map[string]string{
+			"engines":     r.URL.Query().Get("engines"),
+			"language":    r.URL.Query().Get("language"),
+			"safesearch":  r.URL.Query().Get("safesearch"),
+			"time_range":  r.URL.Query().Get("time_range"),
+			"pageno":      r.URL.Query().Get("pageno"),
+			"num":         r.URL.Query().Get("num"),
+			"categories":  r.URL.Query().Get("categories"),
+			"format":      r.URL.Query().Get("format"),
+			"user-agent":  r.Header.Get("User-Agent"),
+			"accept":      r.Header.Get("Accept"),
+			"http_method": r.Method,
+		}
+		resp := SearxngResponse{Results: []searxngResult{}}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	b := NewSearxngBackend(server.URL, "", "", "GET", 10*time.Second, false, false)
+	_, err := b.SearchRaw(SearchOptions{
+		Query:      "test",
+		Categories: []string{"news"},
+		Engines:    []string{"google", "google news"},
+		Language:   "en-US",
+		SafeSearch: "moderate",
+		TimeRange:  "month",
+		PageNo:     2,
+		NumResults: 7,
+	})
+	if err != nil {
+		t.Fatalf("SearchRaw failed: %v", err)
+	}
+
+	want := map[string]string{
+		"engines":     "google,google news",
+		"language":    "en-US",
+		"safesearch":  "1",
+		"time_range":  "month",
+		"pageno":      "2",
+		"num":         "7",
+		"categories":  "news",
+		"format":      "json",
+		"user-agent":  "sx/2.0",
+		"accept":      "application/json",
+		"http_method": "GET",
+	}
+	for key, wantValue := range want {
+		if captured[key] != wantValue {
+			t.Fatalf("%s = %q, want %q (all captured: %#v)", key, captured[key], wantValue, captured)
+		}
 	}
 }
 

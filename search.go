@@ -168,8 +168,7 @@ func performSearch(query string, config *Config, searchOpts *SearchOptions, mgr 
 	// Explicit selection is the user's intent, so the paid-fallback gate does
 	// not apply here (SearchExplicit has no fallback chain).
 	if explicitEngine != "" {
-		results, err := mgr.SearchExplicit(explicitEngine, opts)
-		return backends.SearchOutcome{Results: results, Backend: explicitEngine}, err
+		return mgr.SearchExplicitOutcome(explicitEngine, opts)
 	}
 
 	// Otherwise use primary + fallback chain

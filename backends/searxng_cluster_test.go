@@ -56,6 +56,36 @@ func TestMultiSearxngBackend_SearchOrderedFallsBack(t *testing.T) {
 	}
 }
 
+func TestMultiSearxngBackend_SearchRawOrderedFallsBack(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream error"))
+	}))
+	defer failing.Close()
+
+	working := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{"title":"raw fallback","url":"https://example.com/raw"}],"number_of_results":1}`))
+	}))
+	defer working.Close()
+
+	b := NewMultiSearxngBackend(
+		[]string{failing.URL, working.URL},
+		"", "", "GET", 2*time.Second, false, false,
+		SearxngStrategyOrdered,
+	)
+
+	raw, err := b.SearchRaw(SearchOptions{Query: "test"})
+	if err != nil {
+		t.Fatalf("expected successful raw fallback, got error: %v", err)
+	}
+	if len(raw.Results) != 1 || raw.Results[0].Title != "raw fallback" {
+		t.Fatalf("unexpected raw fallback results: %#v", raw.Results)
+	}
+	if raw.Diagnostics.NumberOfResults != 1 {
+		t.Fatalf("number_of_results = %d, want 1", raw.Diagnostics.NumberOfResults)
+	}
+}
+
 func TestMultiSearxngBackend_SearchParallelFastest(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(150 * time.Millisecond)
@@ -85,6 +115,33 @@ func TestMultiSearxngBackend_SearchParallelFastest(t *testing.T) {
 	}
 	if results[0].Title != "fast" {
 		t.Fatalf("expected fastest result, got %q", results[0].Title)
+	}
+}
+
+func TestMultiSearxngBackend_SearchRawParallelFastest(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"results":[{"title":"slow","url":"https://example.com/slow"}]}`))
+	}))
+	defer slow.Close()
+
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{"title":"fast raw","url":"https://example.com/fast"}]}`))
+	}))
+	defer fast.Close()
+
+	b := NewMultiSearxngBackend(
+		[]string{slow.URL, fast.URL},
+		"", "", "GET", 2*time.Second, false, false,
+		SearxngStrategyParallelFastest,
+	)
+
+	raw, err := b.SearchRaw(SearchOptions{Query: "test"})
+	if err != nil {
+		t.Fatalf("expected raw success, got error: %v", err)
+	}
+	if len(raw.Results) != 1 || raw.Results[0].Title != "fast raw" {
+		t.Fatalf("expected fastest raw result, got %#v", raw.Results)
 	}
 }
 

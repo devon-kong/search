@@ -63,6 +63,8 @@ type SearchOptions struct {
 	OutputFile     string
 	Top            bool
 	Clean          bool
+	Diagnostics    bool
+	StrictEngines  bool
 	TextOnly       bool
 	HTMLOnly       bool
 	ExplicitEngine string // --engine flag: force a specific search backend
@@ -619,13 +621,14 @@ type jsonTiming struct {
 
 // JSONEnvelope is the full machine-readable response contract.
 type JSONEnvelope struct {
-	OK       bool            `json:"ok"`
-	Query    string          `json:"query"`
-	Backend  jsonBackendMeta `json:"backend"`
-	Timing   jsonTiming      `json:"timing"`
-	Results  interface{}     `json:"results"`  // []SearchResult or []map (clean)
-	Warnings []string        `json:"warnings"` // never null; empty slice on success
-	Error    *jsonError      `json:"error"`    // null on success
+	OK          bool                         `json:"ok"`
+	Query       string                       `json:"query"`
+	Backend     jsonBackendMeta              `json:"backend"`
+	Timing      jsonTiming                   `json:"timing"`
+	Results     interface{}                  `json:"results"`  // []SearchResult or []map (clean)
+	Warnings    []string                     `json:"warnings"` // never null; empty slice on success
+	Diagnostics *backends.SearxngDiagnostics `json:"diagnostics,omitempty"`
+	Error       *jsonError                   `json:"error"` // null on success
 }
 
 // mapErrCodeToJSON maps a backends.ErrCode* integer to the stable JSON error
@@ -723,6 +726,9 @@ func writeJSONEnvelopeToFile(env *JSONEnvelope, outputFile string) error {
 // buildResultsForJSON returns the results value for the envelope, applying the
 // clean (omit-empty) transform when requested.
 func buildResultsForJSON(results []SearchResult, clean bool) interface{} {
+	if results == nil {
+		results = []SearchResult{}
+	}
 	if clean {
 		cleaned := make([]map[string]interface{}, len(results))
 		for i, r := range results {

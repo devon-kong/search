@@ -24,6 +24,25 @@ type SearxngBackend struct {
 	client      *http.Client
 }
 
+// SearxngRawResponse carries the untouched SearXNG JSON body plus the parsed
+// fields sx needs for normal search output and diagnostics.
+type SearxngRawResponse struct {
+	Raw         json.RawMessage
+	Results     []SearchResult
+	Diagnostics SearxngDiagnostics
+}
+
+// SearxngDiagnostics is intentionally conservative: version-sensitive SearXNG
+// arrays are preserved as raw JSON while stable scalar metadata is typed.
+type SearxngDiagnostics struct {
+	Answers               json.RawMessage `json:"answers"`
+	Suggestions           json.RawMessage `json:"suggestions"`
+	Infoboxes             json.RawMessage `json:"infoboxes"`
+	UnresponsiveEngines   json.RawMessage `json:"unresponsive_engines"`
+	NumberOfResults       int             `json:"number_of_results"`
+	StrictEnginesWarnings []string        `json:"strict_engines_warnings,omitempty"`
+}
+
 // NewSearxngBackend creates a new SearXNG backend
 func NewSearxngBackend(baseURL, username, password, httpMethod string, timeout time.Duration, noVerifySSL, noUserAgent bool) *SearxngBackend {
 	client := &http.Client{
@@ -76,8 +95,20 @@ func (s *SearxngBackend) IsAvailable() bool {
 
 // Search performs a search against SearXNG
 func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
+	raw, err := s.SearchRaw(opts)
+	if err != nil {
+		return nil, err
+	}
+	return raw.Results, nil
+}
+
+// SearchRaw performs a search and returns SearXNG's original JSON body along
+// with parsed results and diagnostics.
+func (s *SearxngBackend) SearchRaw(opts SearchOptions) (SearxngRawResponse, error) {
+	var out SearxngRawResponse
+
 	if !s.IsAvailable() {
-		return nil, &BackendError{
+		return out, &BackendError{
 			Backend: s.Name(),
 			Err:     fmt.Errorf("SearXNG URL not configured"),
 			Code:    ErrCodeUnavailable,
@@ -99,7 +130,7 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	} else {
 		u, err := url.Parse(s.BaseURL + "/search")
 		if err != nil {
-			return nil, &BackendError{
+			return out, &BackendError{
 				Backend: s.Name(),
 				Err:     fmt.Errorf("invalid SearXNG URL: %s", RedactSecrets(err.Error())),
 				Code:    ErrCodeInvalidResponse,
@@ -115,13 +146,13 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 	if s.HTTPMethod == "POST" {
 		req, err = http.NewRequest("POST", searchURL, reqBody)
 		if err != nil {
-			return nil, s.wrapError(err, ErrCodeNetwork)
+			return out, s.wrapError(err, ErrCodeNetwork)
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	} else {
 		req, err = http.NewRequest("GET", searchURL, nil)
 		if err != nil {
-			return nil, s.wrapError(err, ErrCodeNetwork)
+			return out, s.wrapError(err, ErrCodeNetwork)
 		}
 	}
 
@@ -138,13 +169,13 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, s.wrapError(err, ErrCodeNetwork)
+		return out, s.wrapError(err, ErrCodeNetwork)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, &BackendError{
+		return out, &BackendError{
 			Backend: s.Name(),
 			Err:     fmt.Errorf("HTTP %d: %s", resp.StatusCode, TruncateBody(string(body))),
 			Code:    resp.StatusCode,
@@ -153,12 +184,12 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, s.wrapError(err, ErrCodeInvalidResponse)
+		return out, s.wrapError(err, ErrCodeInvalidResponse)
 	}
 
 	var searchResp SearxngResponse
 	if err := json.Unmarshal(body, &searchResp); err != nil {
-		return nil, s.wrapError(fmt.Errorf("failed to parse JSON: %v", err), ErrCodeInvalidResponse)
+		return out, s.wrapError(fmt.Errorf("failed to parse JSON: %v", err), ErrCodeInvalidResponse)
 	}
 
 	// Transform SearxngResponse to []SearchResult
@@ -167,7 +198,10 @@ func (s *SearxngBackend) Search(opts SearchOptions) ([]SearchResult, error) {
 		results[i] = SearchResult(r)
 	}
 
-	return results, nil
+	out.Raw = append(json.RawMessage(nil), body...)
+	out.Results = results
+	out.Diagnostics = searchResp.Diagnostics()
+	return out, nil
 }
 
 // buildParams constructs URL parameters for SearXNG
@@ -206,6 +240,10 @@ func (s *SearxngBackend) buildParams(query string, opts SearchOptions) url.Value
 		params.Set("pageno", strconv.Itoa(opts.PageNo))
 	}
 
+	if opts.NumResults > 0 {
+		params.Set("num", strconv.Itoa(opts.NumResults))
+	}
+
 	return params
 }
 
@@ -221,10 +259,35 @@ func (s *SearxngBackend) wrapError(err error, code int) *BackendError {
 
 // Internal response type for parsing SearXNG JSON
 type SearxngResponse struct {
-	Results []searxngResult `json:"results"`
+	Results             []searxngResult `json:"results"`
+	Answers             json.RawMessage `json:"answers"`
+	Suggestions         json.RawMessage `json:"suggestions"`
+	Infoboxes           json.RawMessage `json:"infoboxes"`
+	UnresponsiveEngines json.RawMessage `json:"unresponsive_engines"`
+	NumberOfResults     int             `json:"number_of_results"`
 }
 
 type searxngResult SearchResult
+
+// Diagnostics returns a stable diagnostics object even when a SearXNG instance
+// omits optional fields.
+func (r SearxngResponse) Diagnostics() SearxngDiagnostics {
+	return SearxngDiagnostics{
+		Answers:             normalizeRawJSONArray(r.Answers),
+		Suggestions:         normalizeRawJSONArray(r.Suggestions),
+		Infoboxes:           normalizeRawJSONArray(r.Infoboxes),
+		UnresponsiveEngines: normalizeRawJSONArray(r.UnresponsiveEngines),
+		NumberOfResults:     r.NumberOfResults,
+	}
+}
+
+func normalizeRawJSONArray(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage("[]")
+	}
+	return append(json.RawMessage(nil), raw...)
+}
 
 var safeSearchOptions = map[string]int{
 	"none":     0,

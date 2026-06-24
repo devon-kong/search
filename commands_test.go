@@ -157,6 +157,56 @@ func TestNewSearchCmd_IsAliasOfRoot(t *testing.T) {
 	}
 }
 
+func TestNewSearxngCmd_HasRawSubcommandAndFlags(t *testing.T) {
+	oldConfig := config
+	config = getDefaultConfig()
+	defer func() { config = oldConfig }()
+
+	c := newSearxngCmd()
+	var raw *cobra.Command
+	for _, sub := range c.Commands() {
+		if sub.Name() == "raw" {
+			raw = sub
+			break
+		}
+	}
+	if raw == nil {
+		t.Fatalf("searxng command should have a raw subcommand")
+	}
+	for _, flag := range []string{"categories", "news", "engines", "language", "safe-search", "time-range", "num"} {
+		if raw.Flags().Lookup(flag) == nil {
+			t.Fatalf("raw subcommand should expose --%s", flag)
+		}
+	}
+	if raw.Flags().Lookup("clean") != nil {
+		t.Fatalf("raw subcommand must not expose --clean")
+	}
+}
+
+func TestValidateRawSearxngOptions_NormalizesAndExpands(t *testing.T) {
+	opts := &SearchOptions{
+		Categories: []string{"social-media"},
+		SafeSearch: "strict",
+		TimeRange:  "w",
+	}
+	if err := validateRawSearxngOptions(opts); err != nil {
+		t.Fatalf("validateRawSearxngOptions failed: %v", err)
+	}
+	if opts.Categories[0] != "social media" {
+		t.Fatalf("category = %q, want social media", opts.Categories[0])
+	}
+	if opts.TimeRange != "week" {
+		t.Fatalf("time range = %q, want week", opts.TimeRange)
+	}
+}
+
+func TestValidateRawSearxngOptions_InvalidSafeSearch(t *testing.T) {
+	opts := &SearchOptions{SafeSearch: "maybe"}
+	if err := validateRawSearxngOptions(opts); err == nil {
+		t.Fatalf("expected invalid safe-search error")
+	}
+}
+
 func TestNewConfigCmd_HasValidate(t *testing.T) {
 	c := newConfigCmd()
 	var hasValidate bool

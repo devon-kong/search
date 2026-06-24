@@ -19,7 +19,7 @@ This is a Go port of the original Python [searxngr](https://github.com/scross01/
 - **Multi-instance SearXNG failover** - ordered or parallel-fastest strategy
 - **Terminal-based interface** with colorized output
 - **Non-interactive by default** for scripting; `-i` for interactive mode
-- **Search engine selection** (bing, duckduckgo, google, etc. via SearXNG)
+- **Backend and upstream engine selection** (`--engine` selects the sx backend; `--engines` selects SearXNG upstream engines)
 - Support for **search categories** (general, news, images, videos, science, etc.)
 - **Safe search filtering** (none, moderate, strict)
 - **Time-range filtering** (day, week, month, year)
@@ -145,19 +145,30 @@ sx "why is the sky blue"
 sx "golang tutorials" -n 5
 ```
 
-### Select Search Engine
+### Select Backend and SearXNG Engines
 
 ```shell
-# Use a specific backend
+# Use a specific sx backend
 sx "query" --engine exa
 sx "query" --engine jina
 sx "query" --engine brave
 sx "query" --engine tavily
 
+# Use specific SearXNG upstream engines while the sx backend is SearXNG
+sx "query" --engine searxng --engines google,duckduckgo
+sx "query" --engines "google news" --news
+
 # Default: uses the primary engine only (SearXNG). No automatic fallback
 # unless you opt in via fallback_engines (see "Fallback and paid backends").
 sx "query"
 ```
+
+`--engine` selects the sx backend (`searxng`, `brave`, `tavily`, `exa`,
+`jina`). `--engines` is passed through to SearXNG and selects SearXNG upstream
+engines such as `google`, `duckduckgo`, or `google news`. `google` and
+`google news` are different SearXNG upstream engines. `--news` is only a
+category shortcut (`--categories news`); it is not the same as requesting the
+`google news` engine.
 
 > Note: an explicit `--engine tavily` (or any paid backend) is honored -- the
 > paid-fallback gate only applies to *automatic* fallback, not to engines you
@@ -218,7 +229,13 @@ sx "query" --safe-search none
 # Output formats
 sx "query" --json          # JSON output
 sx "query" --json -c       # Clean JSON (no null fields)
+sx "query" --json --diagnostics
+sx "query" --json --diagnostics --engines google --strict-engines
 sx "query" -H              # Raw HTML with anti-bot headers
+
+# Raw SearXNG JSON: no sx envelope, no --clean, no paid fallback
+sx searxng raw "query"
+sx searxng raw "query" --news --engines "google news" --language en-US -r day -n 5
 
 # Interactive mode
 sx "query" -i
@@ -246,8 +263,9 @@ Flags:
       --categories strings   search categories (general, news, videos, images, music, etc.)
       --clean                omit empty/null values in JSON output
       --debug                show debug output
-  -e, --engines strings      SearXNG engines to use
-      --engine string        search backend (searxng, brave, tavily, exa, jina)
+      --diagnostics          include SearXNG diagnostics in --json output
+  -e, --engines strings      SearXNG upstream engines to request
+      --engine string        sx search backend (searxng, brave, tavily, exa, jina)
   -x, --expand               show full URLs in results (URLs are shown by default)
   -F, --files                files category shortcut
   -j, --first                open first result in browser
@@ -272,6 +290,7 @@ Flags:
       --searxng-urls strings    Additional SearXNG instance URLs for failover
   -w, --site string             search within a specific site
   -S, --social               social media category shortcut
+      --strict-engines       warn if requested SearXNG engines are unresponsive or results include other engines
   -T, --text                 fetch pages and convert to markdown
   -r, --time-range string    day, week, month, year
       --timeout float        request timeout in seconds (default 30)
@@ -328,7 +347,8 @@ allow_paid_fallback = true    # tavily may now be used as a fallback
 
 With `--json`, stdout always contains a single valid JSON envelope; logs,
 warnings, and debug go to stderr. Add `-c/--clean` to omit empty fields inside
-each result.
+each result. A successful zero-result search always emits `"results": []`, not
+`null`, in both normal and clean JSON modes.
 
 Success:
 
@@ -349,6 +369,30 @@ Success:
   "error": null
 }
 ```
+
+With `--diagnostics`, successful SearXNG JSON output also includes a
+`diagnostics` object. Without `--diagnostics`, the key is omitted entirely
+(there is no `diagnostics: null`).
+
+```json
+{
+  "diagnostics": {
+    "answers": [],
+    "suggestions": [],
+    "infoboxes": [],
+    "unresponsive_engines": [],
+    "number_of_results": 0
+  }
+}
+```
+
+`answers`, `infoboxes`, and other SearXNG-version-sensitive arrays are passed
+through conservatively instead of being normalized into a strict sx schema.
+`--strict-engines` only has an effect when `--engines` is also set. It adds
+warnings when requested SearXNG engines are reported under
+`unresponsive_engines`, or when result metadata includes engines outside the
+requested set. It does not filter results, fail the command, or change the exit
+code.
 
 Failure:
 
@@ -393,7 +437,7 @@ parameters are intentionally **not** implemented in this phase (documented gaps,
 not silent omissions):
 
 - **SearXNG:** covered -- `q`, `categories`, `engines`, `language`, `pageno`,
-  `time_range`, `safesearch`, `format=json`. Not exposed (UI/instance-level,
+  `time_range`, `safesearch`, `num`, `format=json`. Not exposed (UI/instance-level,
   irrelevant to CLI result extraction): `results_on_new_tab`, `image_proxy`,
   `autocomplete`, `theme`, `enabled/disabled_plugins`. Note: `time_range=week`
   is not an official SearXNG enum -- it is passed through and may be ignored by

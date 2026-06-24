@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -26,6 +28,214 @@ func newSearchCmd(root *cobra.Command) *cobra.Command {
 	// as `sx`. This keeps a single source of truth for search flags.
 	searchCmd.Flags().AddFlagSet(root.Flags())
 	return searchCmd
+}
+
+// newSearxngCmd returns SearXNG-specific commands that intentionally avoid the
+// generic multi-backend envelope.
+func newSearxngCmd() *cobra.Command {
+	searxngCmd := &cobra.Command{
+		Use:   "searxng",
+		Short: "SearXNG-specific commands",
+	}
+
+	var rawOpts SearchOptions
+	var rawNews bool
+	rawNum := defaultResultCount
+	safeSearchDefault := defaultSafeSearch
+	if config != nil {
+		rawNum = config.ResultCount
+		safeSearchDefault = config.SafeSearch
+	}
+
+	rawCmd := &cobra.Command{
+		Use:                   "raw [query...]",
+		Short:                 "Output raw SearXNG JSON",
+		Long:                  "raw queries the configured SearXNG backend and writes SearXNG's JSON response body directly. It does not use the sx JSON envelope, --clean, or paid fallback.",
+		Args:                  cobra.ArbitraryArgs,
+		DisableFlagsInUseLine: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			runSearxngRaw(cmd, args, rawOpts, rawNews, rawNum)
+		},
+	}
+	rawCmd.Flags().StringSliceVar(&rawOpts.Categories, "categories", nil, fmt.Sprintf("SearXNG categories to search in: %s", strings.Join(searxngCategories, ", ")))
+	rawCmd.Flags().BoolVarP(&rawNews, "news", "N", false, "shortcut for --categories news")
+	rawCmd.Flags().StringSliceVarP(&rawOpts.SearxngEngines, "engines", "e", nil, "SearXNG upstream engines to request (for example google, duckduckgo, google news)")
+	rawCmd.Flags().StringVarP(&rawOpts.Language, "language", "l", "", "search results in a specific language")
+	rawCmd.Flags().StringVar(&rawOpts.SafeSearch, "safe-search", safeSearchDefault, "filter results for safe search (none, moderate, strict)")
+	rawCmd.Flags().StringVarP(&rawOpts.TimeRange, "time-range", "r", "", "search results within a specific time range (day, week, month, year)")
+	rawCmd.Flags().IntVarP(&rawNum, "num", "n", rawNum, "requested result count for compatibility with sx search")
+
+	searxngCmd.AddCommand(rawCmd)
+	return searxngCmd
+}
+
+func runSearxngRaw(cmd *cobra.Command, args []string, rawOpts SearchOptions, rawNews bool, rawNum int) {
+	query, ok := rawQueryFromArgsOrStdin(cmd, args)
+	if !ok {
+		return
+	}
+
+	if rawNews {
+		rawOpts.Categories = []string{"news"}
+	}
+
+	if err := validateRawSearxngOptions(&rawOpts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", backends.RedactSecrets(err.Error()))
+		setExit(exitUsageConfig)
+		return
+	}
+
+	if rawOpts.SafeSearch == "" {
+		rawOpts.SafeSearch = config.SafeSearch
+	}
+
+	if err := ensureConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: config error: %s\n", backends.RedactSecrets(err.Error()))
+		setExit(exitUsageConfig)
+		return
+	}
+
+	if !hasSearxngConfigured(config) {
+		emitSearxngRawError(&backends.BackendError{
+			Backend: "searxng",
+			Err:     fmt.Errorf("no SearXNG instance configured"),
+			Code:    backends.ErrCodeUnavailable,
+		})
+		return
+	}
+
+	backendMgr = initBackendManager(config)
+	backend, ok := backendMgr.GetBackend("searxng")
+	if !ok {
+		emitSearxngRawError(fmt.Errorf("SearXNG backend is not registered"))
+		return
+	}
+	rawBackend, ok := backend.(interface {
+		SearchRaw(backends.SearchOptions) (backends.SearxngRawResponse, error)
+	})
+	if !ok {
+		emitSearxngRawError(fmt.Errorf("SearXNG backend does not support raw output"))
+		return
+	}
+
+	raw, err := rawBackend.SearchRaw(backends.SearchOptions{
+		Query:      query,
+		Categories: rawOpts.Categories,
+		Engines:    rawOpts.SearxngEngines,
+		Language:   rawOpts.Language,
+		TimeRange:  rawOpts.TimeRange,
+		SafeSearch: rawOpts.SafeSearch,
+		PageNo:     1,
+		NumResults: rawNum,
+	})
+	if err != nil {
+		emitSearxngRawError(err)
+		return
+	}
+
+	if _, err := os.Stdout.Write(raw.Raw); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing raw JSON: %s\n", backends.RedactSecrets(err.Error()))
+		setExit(exitSearchFail)
+		return
+	}
+	if len(raw.Raw) == 0 || raw.Raw[len(raw.Raw)-1] != '\n' {
+		fmt.Println()
+	}
+}
+
+func rawQueryFromArgsOrStdin(cmd *cobra.Command, args []string) (string, bool) {
+	if isPipeInput() {
+		input, err := readFromStdin()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: error reading from stdin: %s\n", backends.RedactSecrets(err.Error()))
+			setExit(exitUsageConfig)
+			return "", false
+		}
+		query := strings.TrimSpace(input)
+		if query == "" {
+			fmt.Fprintln(os.Stderr, "Error: empty input from stdin")
+			setExit(exitUsageConfig)
+			return "", false
+		}
+		return query, true
+	}
+
+	if len(args) == 0 {
+		_ = cmd.Help()
+		return "", false
+	}
+	return strings.Join(args, " "), true
+}
+
+func validateRawSearxngOptions(rawOpts *SearchOptions) error {
+	for _, category := range rawOpts.Categories {
+		if !validateCategory(category) {
+			return fmt.Errorf("invalid category %q (supported: %s)", category, strings.Join(searxngCategories, ", "))
+		}
+	}
+	for i, category := range rawOpts.Categories {
+		rawOpts.Categories[i] = normalizeCategory(category)
+	}
+
+	if rawOpts.TimeRange != "" {
+		if !validateTimeRange(rawOpts.TimeRange) {
+			return fmt.Errorf("invalid time range %q (use: %s)", rawOpts.TimeRange, strings.Join(timeRangeOptions, ", "))
+		}
+		rawOpts.TimeRange = expandTimeRange(rawOpts.TimeRange)
+	}
+
+	switch rawOpts.SafeSearch {
+	case "", "none", "moderate", "strict":
+		return nil
+	default:
+		return fmt.Errorf("invalid safe-search %q (use: none, moderate, strict)", rawOpts.SafeSearch)
+	}
+}
+
+type searxngRawErrorEnvelope struct {
+	OK    bool            `json:"ok"`
+	Error searxngRawError `json:"error"`
+}
+
+type searxngRawError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Backend string `json:"backend"`
+}
+
+func emitSearxngRawError(err error) {
+	setExit(exitSearchFail)
+	jerr := searxngRawError{
+		Code:    "BACKEND_UNAVAILABLE",
+		Message: "SearXNG raw request failed",
+		Backend: "searxng",
+	}
+
+	var be *backends.BackendError
+	if errors.As(err, &be) {
+		code, _ := mapErrCodeToJSON(be.Code)
+		jerr.Code = code
+		if be.Backend != "" {
+			jerr.Backend = be.Backend
+		}
+		jerr.Message = safeSearxngRawErrorMessage(be)
+	}
+
+	payload := searxngRawErrorEnvelope{OK: false, Error: jerr}
+	if encErr := json.NewEncoder(os.Stdout).Encode(payload); encErr != nil {
+		fmt.Fprintf(os.Stderr, "Error formatting raw error JSON: %s\n", backends.RedactSecrets(encErr.Error()))
+	}
+}
+
+func safeSearxngRawErrorMessage(be *backends.BackendError) string {
+	msg := backends.RedactSecrets(be.Err.Error())
+	if strings.Contains(msg, "://") {
+		return "SearXNG raw request failed"
+	}
+	if msg == "" {
+		return "SearXNG raw request failed"
+	}
+	return msg
 }
 
 // newConfigCmd returns the `sx config` command group with the `validate`
