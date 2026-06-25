@@ -83,18 +83,18 @@ Use --json for a stable machine-readable envelope. Exit codes: 0 success,
 	rootCmd.Flags().StringVar(&config.SearxngURL, "searxng-url", config.SearxngURL, "Primary SearXNG instance URL")
 	rootCmd.Flags().StringSliceVar(&config.SearxngURLs, "searxng-urls", config.SearxngURLs, "Additional SearXNG instance URLs for failover")
 	rootCmd.Flags().StringVar(&config.SearxngStrategy, "searxng-strategy", config.SearxngStrategy, "SearXNG instance strategy (ordered, parallel-fastest)")
-	rootCmd.Flags().StringSliceVar(&searchOpts.Categories, "categories", nil, fmt.Sprintf("list of categories to search in: %s", strings.Join(searxngCategories, ", ")))
+	rootCmd.Flags().StringSliceVar(&searchOpts.Categories, "categories", config.Categories, fmt.Sprintf("list of categories to search in: %s", strings.Join(searxngCategories, ", ")))
 	rootCmd.Flags().BoolVar(&searchOpts.JSON, "json", false, "output search results in JSON format")
 	rootCmd.Flags().BoolVarP(&searchOpts.Clean, "clean", "c", false, "omit empty and null values in JSON output")
 	rootCmd.Flags().BoolVar(&searchOpts.Diagnostics, "diagnostics", false, "include SearXNG diagnostics in --json output")
-	rootCmd.Flags().StringSliceVarP(&searchOpts.SearxngEngines, "engines", "e", nil, "SearXNG upstream engines to request (for example google, duckduckgo, google news)")
+	rootCmd.Flags().StringSliceVarP(&searchOpts.SearxngEngines, "engines", "e", config.Engines, "SearXNG upstream engines to request (for example google, duckduckgo, google news)")
 	rootCmd.Flags().StringVar(&searchOpts.ExplicitEngine, "engine", "", fmt.Sprintf("sx search backend to use (%s)", validEngineNames()))
 	rootCmd.Flags().BoolVar(&searchOpts.StrictEngines, "strict-engines", false, "warn when requested SearXNG engines are unresponsive or results include other engines")
 	rootCmd.Flags().BoolVarP(&searchOpts.Expand, "expand", "x", config.Expand, "show complete URL in search results (URLs are shown by default)")
 	rootCmd.Flags().BoolVarP(&searchOpts.First, "first", "j", false, "open the first result in web browser and exit")
 	rootCmd.Flags().StringVar(&config.HTTPMethod, "http-method", config.HTTPMethod, "HTTP method to use for search requests (GET or POST)")
 	rootCmd.Flags().Float64Var(&config.Timeout, "timeout", config.Timeout, "HTTP request timeout in seconds")
-	rootCmd.Flags().StringVarP(&searchOpts.Language, "language", "l", "", "search results in a specific language")
+	rootCmd.Flags().StringVarP(&searchOpts.Language, "language", "l", config.Language, "search results in a specific language")
 	rootCmd.Flags().BoolVar(&searchOpts.Lucky, "lucky", false, "opens a random result in web browser and exit")
 	rootCmd.Flags().BoolVar(&config.NoVerifySSL, "no-verify-ssl", config.NoVerifySSL, "do not verify SSL certificates")
 	rootCmd.Flags().BoolVar(&config.NoColor, "nocolor", config.NoColor, "disable colored output")
@@ -764,21 +764,23 @@ func printHelp() {
 	fmt.Print(help)
 }
 
-func openURL(url string) error {
-	var cmd *exec.Cmd
+// resolveURLHandler picks the command used to open URLs in a browser. An
+// explicit url_handler from config wins; otherwise the platform default is
+// used. An empty result means no handler is available for this platform.
+func resolveURLHandler(configured, goos string) string {
+	if h := strings.TrimSpace(configured); h != "" {
+		return h
+	}
+	return defaultURLHandlers[goos]
+}
 
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		cmd = exec.Command("xdg-open", url)
-	case "windows":
-		cmd = exec.Command("explorer", url)
-	default:
+func openURL(url string) error {
+	handler := resolveURLHandler(config.URLHandler, runtime.GOOS)
+	if handler == "" {
 		return fmt.Errorf("unsupported platform")
 	}
 
-	return cmd.Start()
+	return exec.Command(handler, url).Start()
 }
 
 func isPipeInput() bool {
