@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "prompt": "帮我搜一下 rust 的所有权模型最新的讲解",
+    "expected": "触发 web-search，发出 `sx --json --num 5 \"...\" </dev/null`（带 stdin 护栏），解析 envelope，回报 title/url/snippet，不抓正文"
+  },
+  {
+    "id": 2,
+    "prompt": "特斯拉今天股价多少，有什么最新消息",
+    "expected": "识别时效性触发搜索；默认 SearXNG、不开 fallback、不调付费后端；一般搜索默认排除 X/Twitter（机制未定，不硬编码）"
+  },
+  {
+    "id": 3,
+    "prompt": "帮我用 tavily 查一下 xxx",
+    "expected": "显式付费后端：先一句话告知\"这是付费后端、会消耗额度\"，然后照跑 `--engine tavily`；不阻断、也不自作主张改 config"
+  }
+]

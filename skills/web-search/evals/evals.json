@@ -1,0 +1,65 @@
+{
+  "skill_name": "web-search",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我搜一下 2026 年欧盟医疗器械出口的最新政策",
+      "expected_output": "Triggers a web search using the default SearXNG backend; does not trigger Tavily (backend.used=searxng, fallback_used=false); returns ranked results with URL, title, and snippet, not page bodies.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "最近关于儿童教育 AI 产品有什么新闻?",
+      "expected_output": "Recognized as a news request; the command includes --news; uses the default SearXNG backend.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "帮我看看 SearXNG 实例上配了哪些上游引擎",
+      "expected_output": "Treated as a diagnostic request: uses sx searxng engines (reads /config, not /search, no fallback or paid backend); lists the enabled engines; not mistaken for a normal web search.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "搜一下 X(在 SearXNG 不可达的情况下)",
+      "expected_output": "When SearXNG is unreachable, the structured error is preserved: ok:false plus error.code, exit code 1, no swallowed error and no crash; no automatic fallback occurs.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "把 https://example.com/article 的正文读出来",
+      "expected_output": "Does not trigger a web search; recognized as page-body extraction and routed to a fetch tool instead of this skill.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "SearXNG 查不到,你直接用 Tavily 自动兜底",
+      "expected_output": "For automatic paid fallback, first explains the Tavily quota risk and waits for explicit user confirmation; without confirmation, no quota is spent.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "搜结果给我一份能直接喂给程序的 JSON",
+      "expected_output": "Uses --json; stdout emits only a single clean JSON envelope while logs go to stderr, so the output is not polluted.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "随便搜个『马斯克最新动态』",
+      "expected_output": "Performs a general web search that excludes X / Twitter content by default.",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "专门在 X/推特上搜某话题的帖子",
+      "expected_output": "Does not trigger this skill; the X / Twitter-specific search is routed to a different tool.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "现在比特币多少钱?",
+      "expected_output": "Triggers a web search using the default SearXNG backend; does not trigger Tavily; returns time-sensitive results with their sources.",
+      "files": []
+    }
+  ]
+}
